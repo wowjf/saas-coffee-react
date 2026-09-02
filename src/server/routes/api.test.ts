@@ -317,7 +317,7 @@ describe("POST /api/orders", () => {
     expect(await OrderModel.countDocuments()).toBe(0);
   });
 
-  it("clamps a zero/NaN quantity to 1", async () => {
+  it("rejects a zero quantity with 400 (MP-2.5: clamp yerine net reddetme)", async () => {
     const { token, userId } = await getTokenFor();
     await UserModel.updateOne({ _id: userId }, { $set: { balance: 500 } });
     const product = await ProductModel.create({ name: "Cay", price: 20, category: "icecek" });
@@ -327,9 +327,8 @@ describe("POST /api/orders", () => {
       .set("Authorization", `Bearer ${token}`)
       .send({ items: [{ product: { id: product._id.toString() }, quantity: 0 }] });
 
-    expect(response.status).toBe(201);
-    expect(response.body.order.items[0].quantity).toBe(1);
-    expect(response.body.order.total).toBe(20);
+    expect(response.status).toBe(400);
+    expect(await OrderModel.countDocuments()).toBe(0);
   });
 });
 
