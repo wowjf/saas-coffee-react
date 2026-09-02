@@ -60,12 +60,49 @@ function normalizeAmount(value: unknown): number | null {
 // REVIEW ENDPOINTS - Ürün Değerlendirmeleri
 // ============================================
 
+// MP-2.6: değerlendirme listelerinde yalnızca güvenli alanlar döner —
+// e-posta/telefon gibi kişisel veriler sızmaz, kullanıcı yalnızca username
+// (userName) ile görünür.
+function serializeReview(doc: {
+  _id: { toString(): string };
+  orderId: string;
+  userId: string;
+  userName: string;
+  productId: string;
+  productName: string;
+  rating: number;
+  comment?: string;
+  staffRating?: number | null;
+  staffComment?: string;
+  response?: string;
+  respondedAt?: string;
+  createdAt?: Date | string;
+  updatedAt?: Date | string;
+}) {
+  return {
+    id: doc._id.toString(),
+    orderId: doc.orderId,
+    userId: doc.userId,
+    userName: doc.userName,
+    productId: doc.productId,
+    productName: doc.productName,
+    rating: doc.rating,
+    comment: doc.comment ?? "",
+    staffRating: doc.staffRating ?? null,
+    staffComment: doc.staffComment ?? "",
+    response: doc.response ?? "",
+    respondedAt: doc.respondedAt ?? "",
+    createdAt: toIsoString(doc.createdAt),
+    updatedAt: toIsoString(doc.updatedAt),
+  };
+}
+
 // Get reviews for a product
 router.get("/reviews/product/:productId", async (req, res) => {
   try {
     const { productId } = req.params;
     const reviews = await ReviewModel.find({ productId }).sort({ createdAt: -1 });
-    return res.json(reviews.map((r) => serializeDocument(r)));
+    return res.json(reviews.map((r) => serializeReview(r)));
   } catch (error) {
     console.error("Get reviews error:", error);
     return res.status(500).json({ message: await getSystemText("degerlendirmeler-yuklenirken-hata-olustu") });
@@ -76,7 +113,7 @@ router.get("/reviews/product/:productId", async (req, res) => {
 router.get("/reviews/my", attachAuth, async (req: AuthRequest, res) => {
   try {
     const reviews = await ReviewModel.find({ userId: req.authUser!._id.toString() }).sort({ createdAt: -1 });
-    return res.json(reviews.map((r) => serializeDocument(r)));
+    return res.json(reviews.map((r) => serializeReview(r)));
   } catch (error) {
     console.error("Get my reviews error:", error);
     return res.status(500).json({ message: await getSystemText("degerlendirmeleriniz-yuklenirken-hata-olustu") });
@@ -86,30 +123,60 @@ router.get("/reviews/my", attachAuth, async (req: AuthRequest, res) => {
 // Create a review
 router.post("/reviews", attachAuth, async (req: AuthRequest, res) => {
   try {
-    const { orderId, productId, productName, rating, comment, staffRating, staffComment } = req.body;
-    
-    if (!orderId || !productId || !rating) {
+    const { orderId, productId, staffRating, staffComment } = req.body;
+    // MP-1.4: dış girdiler normalleştirilir — sayı olmayan puan ve nesne
+    // yorum gövdesi belgeye operatör olarak sızamaz.
+    const rating = Number(req.body?.rating);
+    const comment = typeof req.body?.comment === "string" ? req.body.comment : "";
+
+    if (!orderId || !productId || !Number.isFinite(rating)) {
       return res.status(400).json({ message: await getSystemText("eksik-bilgi") });
     }
-    
-    if (rating < 1 || rating > 5) {
+
+    // MP-2.6: puan 1-5 arasında tam sayı olmalıdır.
+    if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
       return res.status(400).json({ message: await getSystemText("gecersiz-puan") });
     }
 
-    // Check if already reviewed
-    const existing = await ReviewModel.findOne({ orderId, productId, userId: req.authUser!._id.toString() });
+    // MP-2.6: yorum en fazla 1000 karakter olabilir.
+    if (comment.length > 1000) {
+      return res.status(400).json({ message: await getSystemText("yorum-en-fazla-1000-karakter-olabilir") });
+    }
+
+    const userId = req.authUser!._id.toString();
+
+    // MP-2.6: değerlendirme yalnızca kullanıcının kendi, tamamlanmış siparişi için yazılabilir.
+    const order = await OrderModel.findById(orderId);
+    if (!order) {
+      return res.status(404).json({ message: await getSystemText("siparis-bulunamadi") });
+    }
+    if (order.userId !== userId) {
+      return res.status(403).json({ message: await getSystemText("yalnizca-kendi-siparislerinizi-degerlendirebilirsiniz") });
+    }
+    if (order.status !== "completed") {
+      return res.status(400).json({ message: await getSystemText("yalnizca-tamamlanan-siparisler-degerlendirilebilir") });
+    }
+
+    // MP-2.6: ürün adı istemciden alınmaz — katalogdan (ProductModel) çözülür.
+    const product = await ProductModel.findById(productId);
+    if (!product) {
+      return res.status(404).json({ message: await getSystemText("urun-bulunamadi") });
+    }
+
+    // Aynı sipariş için ikinci değerlendirme engellenir.
+    const existing = await ReviewModel.findOne({ orderId, userId });
     if (existing) {
-      return res.status(400).json({ message: await getSystemText("bu-urunu-zaten-degerlendirdiniz") });
+      return res.status(400).json({ message: await getSystemText("bu-siparisi-zaten-degerlendirdiniz") });
     }
 
     const review = await ReviewModel.create({
       orderId,
-      userId: req.authUser!._id.toString(),
+      userId,
       userName: `${req.authUser!.name} ${req.authUser!.surname}`,
       productId,
-      productName,
+      productName: product.name,
       rating,
-      comment: comment || "",
+      comment,
       staffRating: staffRating || null,
       staffComment: staffComment || "",
       createdAt: new Date().toISOString(),
@@ -123,7 +190,7 @@ router.post("/reviews", attachAuth, async (req: AuthRequest, res) => {
       { $set: { averageRating: Math.round(avgRating * 10) / 10, reviewCount: allReviews.length } }
     );
 
-    return res.json(serializeDocument(review));
+    return res.json(serializeReview(review));
   } catch (error) {
     console.error("Create review error:", error);
     return res.status(500).json({ message: await getSystemText("degerlendirme-eklenirken-hata-olustu") });
@@ -152,7 +219,7 @@ router.patch("/reviews/:id/response", attachAuth, restrictTo("manager"), async (
       return res.status(404).json({ message: await getSystemText("degerlendirme-bulunamadi") });
     }
 
-    return res.json(serializeDocument(review));
+    return res.json(serializeReview(review));
   } catch (error) {
     console.error("Review response error:", error);
     return res.status(500).json({ message: await getSystemText("yanit-eklenirken-hata-olustu") });
@@ -932,6 +999,11 @@ router.post("/chat/:roomId/message", attachAuth, async (req: AuthRequest, res) =
     const userName = `${req.authUser!.name} ${req.authUser!.surname}`;
     const userRole = req.authUser!.role;
 
+    // MP-2.6: sohbet mesajı en fazla 1000 karakter olabilir.
+    if (message.length > 1000) {
+      return res.status(400).json({ message: await getSystemText("mesaj-en-fazla-1000-karakter-olabilir") });
+    }
+
     const room = await ChatRoomModel.findById(roomId);
     if (!room) {
       return res.status(404).json({ message: await getSystemText("sohbet-bulunamadi") });
@@ -1198,6 +1270,11 @@ router.post("/waiter-calls", attachAuth, async (req: AuthRequest, res) => {
 
     if (!tableNumber || !type) {
       return res.status(400).json({ message: await getSystemText("eksik-bilgi") });
+    }
+
+    // MP-2.6: garson çağrısı notu en fazla 300 karakter olabilir.
+    if (message.length > 300) {
+      return res.status(400).json({ message: await getSystemText("not-en-fazla-300-karakter-olabilir") });
     }
 
     const call = await WaiterCallModel.create({
