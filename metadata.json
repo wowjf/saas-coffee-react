@@ -1,0 +1,8 @@
+{
+  "name": "Brew & Bloom Ecosystem",
+  "description": "A comprehensive coffee shop ecosystem featuring Customer, Staff, and Manager panels with real-time simulations and minimalist design.",
+  "requestFramePermissions": [
+    "geolocation",
+    "camera"
+  ]
+}

@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      # Bir Node sürümündeki kırılma diğer sürümün sonucunu gizlemesin.
+      fail-fast: false
+      matrix:
+        node: ["20", "22"]
+
+    env:
+      # Testler ve server.ts JWT_SECRET yoksa anında ölür; CI için sabit
+      # değer yeterli (production sırrı değil).
+      JWT_SECRET: ci-test-jwt-secret
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ matrix.node }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: "npm"
+
+      # mongodb-memory-server her koşumda ~30-60 MB mongod indirir;
+      # cache'siz CI süresi ciddi uzar.
+      - name: Cache mongodb-memory-server binaries
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/mongodb-binaries
+          key: mongods-${{ runner.os }}-node${{ matrix.node }}-${{ hashFiles('package-lock.json') }}
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Ayrı tip kontrol adımı: 'lint' script'i tsc --noEmit'e eş ama
+      # aracıdan bağımsız, hızlı ve net bir sinyal olsun.
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Build
+        run: npm run build
+        env:
+          # Build only needs to succeed; runtime secrets are not required here.
+          NODE_ENV: production

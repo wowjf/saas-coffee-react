@@ -1,0 +1,23 @@
+node_modules
+dist
+.env
+.git
+.gitignore
+README.md
+DEPLOY.md
+docker-compose.yml
+Dockerfile
+.dockerignore
+
+# Local dev/runtime artifacts (large — never ship to image)
+.local-mongo
+.runtime-logs
+uploads
+qr-codes
+
+# Editor / OS noise
+.cursor
+.vscode
+*.log
+Thumbs.db
+.DS_Store

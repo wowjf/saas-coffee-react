@@ -1,0 +1,76 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    expose:
+      - "3000"
+    volumes:
+      - uploads_data:/app/uploads
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 3000
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required - set it in your .env file (generate with: openssl rand -hex 32)}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:?ALLOWED_ORIGINS is required in production - list explicit domains, e.g. https://bancho.cafe,https://www.bancho.cafe}
+      MONGODB_URI: mongodb://mongodb:27017/cafe_db
+      ENABLE_SEED: ${ENABLE_SEED:-true}
+      # Guvenlik (MP-0.2 / MP-0.7): bootstrap yonetici kimlik bilgisinde sabit
+      # fallback yok — .env doldurulmali (sifre icin zorunlu, bkz. :?).
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:?BOOTSTRAP_ADMIN_EMAIL is required - set a unique admin address in your .env file}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?BOOTSTRAP_ADMIN_PASSWORD is required - set a strong unique password in your .env file}
+      BOOTSTRAP_ADMIN_NAME: ${BOOTSTRAP_ADMIN_NAME:-Admin}
+      BOOTSTRAP_ADMIN_SURNAME: ${BOOTSTRAP_ADMIN_SURNAME:-User}
+      DEFAULT_MANAGER_EMAILS: ${BOOTSTRAP_ADMIN_EMAIL}
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    networks:
+      - bancho_network
+
+  mongodb:
+    image: mongo:7
+    restart: unless-stopped
+    expose:
+      - "27017"
+    volumes:
+      - mongodb_data:/data/db
+    healthcheck:
+      test: ["CMD-SHELL", "echo 'db.runCommand({ ping: 1 }).ok' | mongosh localhost:27017/test --quiet"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - bancho_network
+
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - certbot_www:/var/www/certbot:ro
+      - uploads_data:/app/uploads:ro
+    depends_on:
+      app:
+        condition: service_healthy
+    networks:
+      - bancho_network
+
+volumes:
+  mongodb_data:
+    name: bancho_mongodb_data
+  uploads_data:
+    name: bancho_uploads_data
+  certbot_www:
+    name: bancho_certbot_www
+
+networks:
+  bancho_network:
+    driver: bridge

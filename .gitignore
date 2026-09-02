@@ -1,0 +1,22 @@
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+
+.env*
+!.env.example
+
+.runtime-logs/
+.local-mongo/
+uploads/
+
+# SSL sertifikaları (canlı ortamda volume ile mount edilir, repoya girmez)
+nginx/ssl/live/
+
+# MP-1.5: otomatik üretilen VAPID özel anahtarı repoya girmez
+.vapid-keys.json
+
+squashfs-root/
+__pycache__/
