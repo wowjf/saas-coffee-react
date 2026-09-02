@@ -1,9 +1,11 @@
 import mongoose from "mongoose";
 
+// MP-2.12: category index — menü kategoriye göre listelenir.
+// MP-2.14: price required + min:0 — negatif/eksik fiyat new-save'lerde reddedilir.
 const ProductSchema = new mongoose.Schema(
   {
     name: { type: String, required: true },
-    price: { type: Number, required: true },
+    price: { type: Number, required: true, min: 0 },
     category: { type: String, required: true },
     description: { type: String, default: "" },
     image: { type: String, default: "" },
@@ -15,6 +17,9 @@ const ProductSchema = new mongoose.Schema(
   },
   { timestamps: true },
 );
+
+// MP-2.12: kategori bazlı menü okumaları.
+ProductSchema.index({ category: 1 });
 
 export type ProductDocument = mongoose.InferSchemaType<typeof ProductSchema> & mongoose.Document;
 

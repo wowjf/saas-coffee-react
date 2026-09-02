@@ -19,6 +19,11 @@ const NotificationSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
+// MP-2.12: Notification en çok okunan koleksiyon (5 sn polling). (userId, event)
+// ve (targetRole, event) bileşik indexleri hedef+kategori okumalarını karşılar.
+NotificationSchema.index({ userId: 1, event: 1 });
+NotificationSchema.index({ targetRole: 1, event: 1 });
+
 export type NotificationDocument = mongoose.InferSchemaType<typeof NotificationSchema> & mongoose.Document;
 
 const NotificationModel =

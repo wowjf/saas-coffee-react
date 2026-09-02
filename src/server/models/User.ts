@@ -105,6 +105,10 @@ const UserSchema = new mongoose.Schema(
     birthDate: { type: String, default: "" },
     role: { type: String, enum: ["customer", "staff", "manager"], default: "customer" },
     sessionRole: { type: String, enum: ["customer", "staff", "manager"], default: null },
+    // MP-2.1: token iptal versiyonu. JWT'ye gomulur; parola degisikligi,
+    // logout ve rol dususunde arttirilarak eski token'lar gecersiz kilinir.
+    // Default 0 eski belgelerle ve eski token'larla geriye donuk uyumludur.
+    tokenVersion: { type: Number, default: 0 },
     // MP-1.1: hesap bazli brute-force kilidi. 5 basarisiz giris sonrasi
     // lockUntil dolana kadar giris reddedilir; basarili giris sayaci sifirlar.
     failedLoginAttempts: { type: Number, default: 0 },

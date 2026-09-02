@@ -21,6 +21,13 @@ const ReviewSchema = new mongoose.Schema(
 ReviewSchema.index({ productId: 1, createdAt: -1 });
 ReviewSchema.index({ userId: 1, createdAt: -1 });
 
+// MP-2.12: bir sipariş için yalnızca bir gerçek (comment'i dolu) review
+// yazılabilir; comment'i boş kayıtlar (iskelet/placeholder) index dışıdır.
+ReviewSchema.index(
+  { orderId: 1 },
+  { unique: true, partialFilterExpression: { comment: { $gt: "" } } }
+);
+
 export type ReviewDocument = mongoose.InferSchemaType<typeof ReviewSchema> & mongoose.Document;
 
 const ReviewModel =

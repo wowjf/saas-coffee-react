@@ -57,6 +57,9 @@ TableSessionSchema.index(
   { unique: true, partialFilterExpression: { status: "open" } }
 );
 
+// MP-2.12: masa kimliği + durum ile oturum aramaları.
+TableSessionSchema.index({ tableId: 1, status: 1 });
+
 export type TableSessionDocument = mongoose.InferSchemaType<typeof TableSessionSchema> & mongoose.Document;
 
 const TableSessionModel =

@@ -1,5 +1,7 @@
 import mongoose from "mongoose";
 
+// MP-2.12: sipariş listeleme profili için bileşik index (kullanıcı + durum + zaman).
+// MP-2.14: total alt sınırı — negatif sipariş tutarı new-save'lerde reddedilir.
 const OrderItemSchema = new mongoose.Schema(
   {
     product: {
@@ -23,7 +25,7 @@ const OrderSchema = new mongoose.Schema(
     tableNumber: { type: String, default: "" },
     tableSessionToken: { type: String, default: "", index: true },
     items: { type: [OrderItemSchema], required: true, default: [] },
-    total: { type: Number, required: true },
+    total: { type: Number, required: true, min: 0 },
     status: {
       type: String,
       enum: ["pending", "preparing", "ready", "completed", "rejected"],
@@ -61,6 +63,10 @@ const OrderSchema = new mongoose.Schema(
   },
   { timestamps: true },
 );
+
+// MP-2.12: {userId:1, status:1, timestamp:-1} — "kullanıcının duruma göre
+// sıralı siparişleri" sorgularını tek index ile karşılar.
+OrderSchema.index({ userId: 1, status: 1, timestamp: -1 });
 
 export type OrderDocument = mongoose.InferSchemaType<typeof OrderSchema> & mongoose.Document;
 
