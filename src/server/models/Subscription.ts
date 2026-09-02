@@ -1,5 +1,9 @@
 import mongoose from "mongoose";
 
+// MP-2.11: abonelik tarih alanlari ISO string olarak saklanir; validator
+// bicimi garanti eder (server-side uretilir, istemciden gelmez).
+const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}/;
+
 const SubscriptionPlanSchema = new mongoose.Schema(
   {
     name: { type: String, required: true },
@@ -22,10 +26,31 @@ const SubscriptionSchema = new mongoose.Schema(
     planId: { type: String, required: true },
     planName: { type: String, required: true },
     status: { type: String, enum: ["active", "cancelled", "expired"], default: "active" },
-    startDate: { type: String, required: true },
-    endDate: { type: String, required: true },
+    startDate: {
+      type: String,
+      required: true,
+      validate: {
+        validator: (v: string) => ISO_DATE_PATTERN.test(v),
+        message: "startDate ISO tarih biciminde olmalidir",
+      },
+    },
+    endDate: {
+      type: String,
+      required: true,
+      validate: {
+        validator: (v: string) => ISO_DATE_PATTERN.test(v),
+        message: "endDate ISO tarih biciminde olmalidir",
+      },
+    },
     autoRenew: { type: Boolean, default: true },
-    cancelledAt: { type: String, default: "" },
+    cancelledAt: {
+      type: String,
+      default: "",
+      validate: {
+        validator: (v: string) => v === "" || ISO_DATE_PATTERN.test(v),
+        message: "cancelledAt ISO tarih biciminde olmalidir",
+      },
+    },
   },
   { timestamps: true },
 );

@@ -1,5 +1,9 @@
 import mongoose from "mongoose";
 
+// MP-2.11: createdAt Date olarak saklanir (eski String kayitlar Mongoose
+// cast'i ile okunur); API serilestirmesinde toIsoString ile ISO string'e
+// cevrilir. acknowledgedAt/completedAt server-side ISO string uretmeye devam
+// eder (serializer beslemesi ayni kalir).
 const WaiterCallSchema = new mongoose.Schema(
   {
     tableNumber: { type: String, required: true, index: true },
@@ -10,7 +14,7 @@ const WaiterCallSchema = new mongoose.Schema(
     message: { type: String, default: "" },
     priority: { type: String, enum: ["normal", "urgent"], default: "normal" },
     status: { type: String, enum: ["pending", "acknowledged", "completed", "cancelled"], default: "pending" },
-    createdAt: { type: String, required: true },
+    createdAt: { type: Date, required: true },
     acknowledgedBy: { type: String, default: "" },
     acknowledgedAt: { type: String, default: "" },
     completedBy: { type: String, default: "" },

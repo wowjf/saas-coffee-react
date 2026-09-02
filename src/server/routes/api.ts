@@ -76,8 +76,10 @@ const imageUpload = multer({
   },
 });
 
-function signToken(userId: string) {
-  return jwt.sign({ userId }, process.env.JWT_SECRET!, {
+// MP-2.1: token iptal versiyonu — payload'a gomulur; kullanici dokumanindaki
+// tokenVersion arttiginda eski token'lar 401 alir (tum oturumlar duser).
+function signToken(userId: string, tokenVersion: number) {
+  return jwt.sign({ userId, tokenVersion }, process.env.JWT_SECRET!, {
     expiresIn: "7d",
   });
 }
@@ -159,6 +161,67 @@ function serializeSimpleDocument(document: {
 
 function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// MP-2.2: yaygin/kolay tahmin edilebilir parolalar kabul edilmez.
+const COMMON_PASSWORD_BLACKLIST = new Set([
+  "12345678",
+  "123456789",
+  "1234567890",
+  "password",
+  "password1",
+  "password123",
+  "passw0rd",
+  "admin123",
+  "admin123!",
+  "admin1234",
+  "qwerty123",
+  "qwertyuiop",
+  "1q2w3e4r",
+  "abc12345",
+  "iloveyou1",
+  "welcome1",
+  "welcome123",
+  "letmein1",
+  "monkey123",
+  "dragon123",
+  "sifre123",
+  "sifre1234",
+  "sifrem123",
+  "parola123",
+]);
+
+// MP-2.2: parola politikasi — en az 8 karakter, en az bir harf ve bir rakam.
+// Kara liste ve e-posta/kullanici adi icermesi de burada denetlenir.
+// Donulen deger, dogrulama basarisizsa kullanilacak system-text anahtaridir.
+async function validatePasswordPolicy(
+  password: string,
+  context?: { email?: string; username?: string },
+): Promise<string | null> {
+  if (password.length < 8) {
+    return await getSystemText("sifre-en-az-8-karakterden-olusmalidir");
+  }
+
+  if (!/[a-zA-ZçğıöşüÇĞİÖŞÜ]/.test(password) || !/[0-9]/.test(password)) {
+    return await getSystemText("sifre-en-az-bir-harf-ve-bir-rakam-icermelidir");
+  }
+
+  if (COMMON_PASSWORD_BLACKLIST.has(password.toLowerCase())) {
+    return await getSystemText("bu-sifre-cok-yaygin-lutfen-daha-guvenli-bir-sifre-secin");
+  }
+
+  if (context) {
+    const localEmailPart = (context.email || "").split("@")[0]?.toLowerCase() || "";
+    const username = (context.username || "").toLowerCase();
+    const normalizedPassword = password.toLowerCase();
+
+    if ((localEmailPart.length >= 3 && normalizedPassword.includes(localEmailPart)) ||
+        (username.length >= 3 && normalizedPassword.includes(username))) {
+      return await getSystemText("sifre-e-posta-veya-kullanici-adi-iceremez");
+    }
+  }
+
+  return null;
 }
 
 function isImageScope(value: string): value is ImageScope {
@@ -545,10 +608,13 @@ async function buildBootstrapPayload(user: any) {
  * veriler O(n×m) maliyet üretiyordu; artık yalnızca bu endpoint'te sunulur.
  */
 async function buildAdminOverviewPayload() {
+  // MP-2.13: ağır dizilere limit — users/balanceTopUps sınırsız dönmüyordu;
+  // artık ilk 200 kayıt döner (tümü için GET /users?envelope=1 ve
+  // GET /balance-top-ups?envelope=1 paginasyonlu endpoint'leri kullanılır).
   const [logs, users, balanceTopUps] = await Promise.all([
     ChangeLogModel.find().sort({ timestamp: -1 }).limit(100),
-    UserModel.find().sort({ createdAt: -1 }),
-    BalanceTopUpModel.find().sort({ timestamp: -1 }),
+    UserModel.find().sort({ createdAt: -1 }).limit(200),
+    BalanceTopUpModel.find().sort({ timestamp: -1 }).limit(200),
   ]);
 
   return {
@@ -556,6 +622,28 @@ async function buildAdminOverviewPayload() {
     balanceTopUps: balanceTopUps.map((item) => serializeBalanceTopUp(item)),
     recentChanges: logs.map((item) => serializeLog(item)),
   };
+}
+
+/**
+ * MP-2.13: manager listelerinde pagination. ?page=&limit= desteği —
+ * varsayılan limit 50, üst sınır 200. Dizi yanıtı bozulmaz (geriye
+ * uyumluluk): toplam kayıt sayısı X-Total-Count başlığıyla, meta
+ * bilgisi ise ?envelope=1 ile {items, page, limit, total} sarılır.
+ */
+const PAGINATION_DEFAULT_LIMIT = 50;
+const PAGINATION_MAX_LIMIT = 200;
+
+function parsePaginationParams(query: Record<string, unknown>) {
+  const rawPage = Number.parseInt(String(query.page ?? ""), 10);
+  const rawLimit = Number.parseInt(String(query.limit ?? ""), 10);
+
+  const page = Number.isInteger(rawPage) && rawPage >= 1 ? rawPage : 1;
+  const limit =
+    Number.isInteger(rawLimit) && rawLimit >= 1
+      ? Math.min(rawLimit, PAGINATION_MAX_LIMIT)
+      : PAGINATION_DEFAULT_LIMIT;
+
+  return { page, limit, skip: (page - 1) * limit };
 }
 
 function ensureNumber(value: unknown) {
@@ -685,8 +773,11 @@ router.post("/auth/register", async (req, res, next) => {
       return res.status(400).json({ message: "Kullanıcı adı 3-20 karakter arasında olmalı, yalnızca küçük harf, rakam ve alt çizgi içerebilir." });
     }
 
-    if (password.length < 6) {
-      return res.status(400).json({ message: await getSystemText("sifre-en-az-6-karakterden-olusmalidir") });
+    // MP-2.2: parola politikasi — 8+ karakter, harf+rakam, kara liste,
+    // e-posta/kullanici adi icermeme.
+    const passwordError = await validatePasswordPolicy(password, { email, username });
+    if (passwordError) {
+      return res.status(400).json({ message: passwordError });
     }
 
     if (!["female", "male"].includes(gender)) {
@@ -768,7 +859,7 @@ router.post("/auth/register", async (req, res, next) => {
     });
 
     return res.status(201).json({
-      token: signToken(user._id.toString()),
+      token: signToken(user._id.toString(), user.tokenVersion ?? 0),
       user: serializeUser(user),
     });
   } catch (error) {
@@ -858,7 +949,7 @@ router.post("/auth/login", async (req, res, next) => {
     await syncShiftStatusForUser(user, "İzinli");
 
     return res.json({
-      token: signToken(user._id.toString()),
+      token: signToken(user._id.toString(), user.tokenVersion ?? 0),
       user: serializeUser(user),
     });
   } catch (error) {
@@ -870,6 +961,8 @@ router.post("/auth/login", async (req, res, next) => {
 router.post("/auth/logout", attachAuth, async (req, res) => {
   if (req.authUser) {
     req.authUser.sessionRole = req.authUser.role === "customer" ? "customer" : null;
+    // MP-2.1: logout tum oturumlari dusurur — tokenVersion arttirilir.
+    req.authUser.tokenVersion = (req.authUser.tokenVersion ?? 0) + 1;
     await req.authUser.save();
   }
   await syncShiftStatusForUser(req.authUser, "İzinli");
@@ -1377,8 +1470,13 @@ router.post("/users/me/password", attachAuth, async (req, res, next) => {
       return res.status(400).json({ message: await getSystemText("mevcut-sifre-ve-yeni-sifre-gerekli") });
     }
 
-    if (nextPassword.length < 6) {
-      return res.status(400).json({ message: await getSystemText("yeni-sifre-en-az-6-karakter-olmali") });
+    // MP-2.2: ayni parola politikasi sifre degisikliginde de uygulanir.
+    const passwordError = await validatePasswordPolicy(nextPassword, {
+      email: normalizeEmail(req.authUser.email || ""),
+      username: String(req.authUser.username || ""),
+    });
+    if (passwordError) {
+      return res.status(400).json({ message: passwordError });
     }
 
     if (!(await req.authUser.comparePassword(currentPassword))) {
@@ -1386,6 +1484,9 @@ router.post("/users/me/password", attachAuth, async (req, res, next) => {
     }
 
     req.authUser.password = nextPassword;
+    // MP-2.1: parola degisikligi tum oturumlari dusurur (diger cihazlar
+    // dahil) — tokenVersion arttirilir.
+    req.authUser.tokenVersion = (req.authUser.tokenVersion ?? 0) + 1;
     await req.authUser.save();
 
     return res.json({ success: true });
@@ -1530,9 +1631,44 @@ router.post("/loyalty/scan/redeem-campaign", attachAuth, restrictTo("staff", "ma
   }
 });
 
-router.get("/users", attachAuth, restrictTo("manager"), async (_req, res) => {
-  const users = await UserModel.find().sort({ createdAt: -1 });
-  res.json(users.map((item) => serializeUser(item)));
+// MP-2.13: ?page=&limit= desteği (varsayılan 50, üst sınır 200). Yanıt gövdesi
+// eski istemciler için dizi olarak korunur; toplam kayıt X-Total-Count
+// başlığıyla, meta ise ?envelope=1 ile {items, page, limit, total} olarak döner.
+router.get("/users", attachAuth, restrictTo("manager"), async (req, res) => {
+  const { page, limit, skip } = parsePaginationParams(req.query as Record<string, unknown>);
+  const [users, total] = await Promise.all([
+    UserModel.find().sort({ createdAt: -1 }).skip(skip).limit(limit),
+    UserModel.countDocuments(),
+  ]);
+  const items = users.map((item) => serializeUser(item));
+
+  res.setHeader("X-Total-Count", String(total));
+
+  if (String((req.query as Record<string, unknown>).envelope ?? "") === "1") {
+    return res.json({ items, page, limit, total });
+  }
+
+  return res.json(items);
+});
+
+// MP-2.13: manager için bakiye hareketleri listesi — /admin/overview'daki
+// sınırsız dizinin paginasyonlu hali. Format /users ile aynı (dizi + X-Total-Count,
+// ?envelope=1 ile {items, page, limit, total}).
+router.get("/balance-top-ups", attachAuth, restrictTo("manager"), async (req, res) => {
+  const { page, limit, skip } = parsePaginationParams(req.query as Record<string, unknown>);
+  const [topUps, total] = await Promise.all([
+    BalanceTopUpModel.find().sort({ timestamp: -1 }).skip(skip).limit(limit),
+    BalanceTopUpModel.countDocuments(),
+  ]);
+  const items = topUps.map((item) => serializeBalanceTopUp(item));
+
+  res.setHeader("X-Total-Count", String(total));
+
+  if (String((req.query as Record<string, unknown>).envelope ?? "") === "1") {
+    return res.json({ items, page, limit, total });
+  }
+
+  return res.json(items);
 });
 
 router.patch("/users/:id", attachAuth, restrictTo("manager"), async (req, res, next) => {
@@ -1582,6 +1718,9 @@ router.patch("/users/:id", attachAuth, restrictTo("manager"), async (req, res, n
     }
 
     user.role = nextRole;
+    // MP-2.1: rol degisikliginde kullanici hesabinin tum oturumlari
+    // dusurulur — ayri calisma rollu eski token ile devam edemez.
+    user.tokenVersion = (user.tokenVersion ?? 0) + 1;
     await user.save();
 
     return res.json({ user: serializeUser(user) });
@@ -2181,7 +2320,11 @@ router.patch("/staff/:id", attachAuth, restrictTo("manager"), async (req, res, n
     }
 
     if (nextRole === "customer") {
-      await UserModel.updateOne({ email: staff.email }, { $set: { role: "customer" } });
+      // MP-2.1: ayri calisma dususunde oturumlar dusurulur.
+      await UserModel.updateOne(
+        { email: staff.email },
+        { $set: { role: "customer" }, $inc: { tokenVersion: 1 } },
+      );
       await staff.deleteOne();
       return res.json({ success: true, removed: true });
     }
@@ -2204,7 +2347,11 @@ router.delete("/staff/:id", attachAuth, restrictTo("manager"), async (req, res) 
     // Guvenlik (MP-0.2): personel kaydi silindiginde kullanici customer'a
     // dusurulur; yalnizca env uzerinden tanimli yonetici e-postalari korunur.
     if (!isConfiguredManagerEmail(staff.email)) {
-      await UserModel.updateOne({ email: staff.email }, { $set: { role: "customer" } });
+      // MP-2.1: personel kaydi silinip customer'a dusurulurken oturumlar dusulur.
+      await UserModel.updateOne(
+        { email: staff.email },
+        { $set: { role: "customer" }, $inc: { tokenVersion: 1 } },
+      );
     }
 
     await staff.deleteOne();
@@ -2238,13 +2385,30 @@ router.post("/orders", attachAuth, async (req, res) => {
 
   const incomingItems = Array.isArray(req.body.items) ? req.body.items : [];
 
+  // MP-2.5: adet ve kalem sınırları — 1..50 arası tam sayı adet, en fazla
+  // 50 kalem. Eskiden quantity 0/NaN 1'e keçiriliyordu; artık geçersiz adet
+  // net 400 döner.
   if (incomingItems.length === 0) {
     return res.status(400).json({ message: await getSystemText("siparis-bos-olamaz") });
+  }
+
+  if (incomingItems.length > 50) {
+    return res.status(400).json({ message: await getSystemText("siparis-kalem-siniri-asilir") });
+  }
+
+  for (const item of incomingItems) {
+    const quantity = Number(item?.quantity);
+    if (!Number.isInteger(quantity) || quantity < 1 || quantity > 50) {
+      return res.status(400).json({ message: await getSystemText("siparis-adedi-gecersiz") });
+    }
   }
 
   const normalizedItems = await Promise.all(
     incomingItems.map(async (item) => {
       const productId = String(item.product?.id || item.productId || "");
+      // MP-2.5: fiyat/name/kategori dâhil tüm ürün verisi sunucuda
+      // ProductModel'den çözülür — istemciden gelen item.product.price
+      // gibi alanlar asla okunmaz (mevcut davranışın doğrulanması).
       const product = await ProductModel.findById(productId);
 
       if (!product || !product.inStock) {
@@ -2253,7 +2417,7 @@ router.post("/orders", attachAuth, async (req, res) => {
         throw new ApiError(400, "PRODUCT_OUT_OF_STOCK", await getSystemText("bazi-urunler-stokta-degil"));
       }
 
-      const quantity = Math.max(1, Number(item.quantity) || 1);
+      const quantity = Number(item.quantity);
 
       return {
         product: {
@@ -2299,6 +2463,31 @@ router.post("/orders", attachAuth, async (req, res) => {
         orderUserName = participant.userName;
       }
     }
+
+    // MP-2.5: masa siparişinde katılımcı bakiye kontrolü. Masa akışında
+    // bakiye sipariş anında değil /table-sessions/pay'da düşülür; bu nedenle
+    // katılımcının masadaki mevcut borcu + bu yeni sipariş bakiyesini
+    // aşmamalı (negatif bakiyeye izin verilmez). Personel/yönetici siparişinde
+    // borç hedef katılımcıya yazılır, kontrol o kullanıcı üzerinden yapılır.
+    const existingOrders = await OrderModel.find({
+      tableSessionToken,
+      userId: orderUserId,
+      status: { $ne: "rejected" },
+    });
+    const paidSoFar = session.participants
+      .filter((p) => p.userId === orderUserId)
+      .reduce((sum, p) => sum + (p.paidAmount || 0), 0);
+    const existingDebt = Math.max(
+      0,
+      Number((existingOrders.reduce((sum, o) => sum + o.total, 0) - paidSoFar).toFixed(2)),
+    );
+
+    const debtor = await UserModel.findById(orderUserId);
+    const debtorBalance = debtor ? Number(debtor.balance || 0) : 0;
+
+    if (Number((existingDebt + total).toFixed(2)) > debtorBalance) {
+      return res.status(400).json({ message: await getSystemText("masa-siparis-bakiyesi-yetersiz") });
+    }
   }
 
   if (!tableSessionToken) {
@@ -2337,7 +2526,7 @@ router.post("/orders", attachAuth, async (req, res) => {
 });
 
 router.patch("/orders/:id/status", attachAuth, restrictTo("staff", "manager"), async (req, res) => {
-  const order = await OrderModel.findById(req.params.id);
+  let order = await OrderModel.findById(req.params.id);
 
   if (!order) {
     return res.status(404).json({ message: await getSystemText("siparis-bulunamadi") });
@@ -2366,26 +2555,43 @@ router.patch("/orders/:id/status", attachAuth, restrictTo("staff", "manager"), a
     return res.status(400).json({ message: `Sipariş durumu ${previousStatus} iken ${newStatus} yapılamaz.` });
   }
 
-  order.status = newStatus;
-  order.cancelReason =
-    newStatus === "rejected" ? String(req.body.cancelReason || "").trim() : order.cancelReason || "";
+  const statusUpdate: Record<string, unknown> = {
+    status: newStatus,
+    cancelReason:
+      newStatus === "rejected" ? String(req.body.cancelReason || "").trim() : order.cancelReason || "",
+  };
 
-  if (req.body.status === "completed" && req.authUser) {
-    order.completedBy = {
+  if (newStatus === "completed" && req.authUser) {
+    statusUpdate.completedBy = {
       id: req.authUser._id.toString(),
       name: `${req.authUser.name} ${req.authUser.surname}`.trim(),
     };
   }
 
-  await order.save();
+  // MP-2.15: durum geçişi artık koşullu atomik findOneAndUpdate ile yapılır —
+  // sorgu hem geçerli önceki durumu doğrular hem de yarış koşulunda (iki
+  // eşzamanlı red/tamamlama isteği) yalnızca birinin geçmesini sağlar.
+  order = await OrderModel.findOneAndUpdate(
+    { _id: order._id, status: previousStatus },
+    { $set: statusUpdate },
+    { new: true },
+  );
+
+  if (!order) {
+    return res.status(409).json({ message: await getSystemText("bakiye-yetersiz-veya-islem-sirasinda-bir-cakisma-olustu") });
+  }
 
   if (newStatus === "rejected") {
     if (!order.tableSessionToken) {
-      const user = await UserModel.findById(order.userId);
-      if (user) {
-        user.balance = Number((user.balance + order.total).toFixed(2));
-        await user.save();
-      }
+      // MP-2.15: iade read-modify-write save() yerine atomik $inc — aynı
+      // sipariş ikinci kez iade edilemez (üstteki status guard'ı zaten
+      // geçişi tek seferlik yapar) ve eşzamanlı bakiye güncellemeleri
+      // birbirinin üzerine yazmaz.
+      const refundTotal = Number(order.total.toFixed(2));
+      await UserModel.updateOne(
+        { _id: order.userId },
+        { $inc: { balance: refundTotal } },
+      );
     }
     await createCustomerOrderNotification(order.userId, "order_cancelled", order._id.toString());
   }

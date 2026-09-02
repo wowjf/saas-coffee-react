@@ -50,11 +50,19 @@ export async function attachAuth(req: AuthRequest, res: Response, next: NextFunc
       algorithms: ["HS256"],
     }) as {
       userId: string;
+      tokenVersion?: number;
     };
     const user = await UserModel.findById(decoded.userId);
 
     if (!user) {
       return res.status(401).json({ message: await getSystemText("oturum-bulunamadi") });
+    }
+
+    // MP-2.1: token iptali — token'daki versiyon kullanici dokumanindan
+    // geride kaldiysa oturum dusurulmustur (parola degisikligi/logout/rol dususu).
+    // Eski (versiyonsuz) token'lar 0 kabul edilerek geriye donuk uyumludur.
+    if ((decoded.tokenVersion ?? 0) !== (user.tokenVersion ?? 0)) {
+      return res.status(401).json({ message: await getSystemText("oturum-guncel-degil") });
     }
 
     req.authUser = user;
@@ -78,9 +86,19 @@ export async function attachOptionalAuth(req: AuthRequest, _res: Response, next:
       algorithms: ["HS256"],
     }) as {
       userId: string;
+      tokenVersion?: number;
     };
-    req.authUser = await UserModel.findById(decoded.userId);
-    req.authRole = req.authUser ? getEffectiveRole(req.authUser) : undefined;
+    const user = await UserModel.findById(decoded.userId);
+
+    // MP-2.1: iptal edilmis token opsiyonel auth'ta da sessizce reddedilir.
+    if (user && (decoded.tokenVersion ?? 0) !== (user.tokenVersion ?? 0)) {
+      req.authUser = undefined;
+      req.authRole = undefined;
+      return next();
+    }
+
+    req.authUser = user;
+    req.authRole = user ? getEffectiveRole(user) : undefined;
   } catch (error) {
     req.authUser = undefined;
     req.authRole = undefined;

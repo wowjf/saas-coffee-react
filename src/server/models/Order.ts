@@ -13,7 +13,16 @@ const OrderItemSchema = new mongoose.Schema(
       ingredients: [{ type: String }],
       inStock: { type: Boolean, default: true },
     },
-    quantity: { type: Number, required: true, min: 1 },
+    // MP-2.14: adet pozitif tam sayi — 1.5 adet kahve new-save'lerde reddedilir.
+    quantity: {
+      type: Number,
+      required: true,
+      min: 1,
+      validate: {
+        validator: (v: number) => Number.isInteger(v),
+        message: "Urun adedi tam sayi olmalidir",
+      },
+    },
   },
   { _id: false },
 );

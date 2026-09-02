@@ -2,7 +2,9 @@ import mongoose from "mongoose";
 
 const ReviewSchema = new mongoose.Schema(
   {
-    orderId: { type: String, required: true, index: true },
+    // MP-2.12: alan seviyesi index kaldırıldı — partial-unique (aşağıda)
+    // aynı "orderId_1" adını alınca çakışıyordu.
+    orderId: { type: String, required: true },
     userId: { type: String, required: true, index: true },
     userName: { type: String, required: true },
     productId: { type: String, required: true, index: true },

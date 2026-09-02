@@ -1233,11 +1233,20 @@ router.post("/reservations/:id/cancel", attachAuth, async (req: AuthRequest, res
 // WAITER CALL ENDPOINTS - Garson Çağrı Sistemi
 // ============================================
 
+// MP-2.11: WaiterCall.createdAt artik Date — serilestirmede ISO string'e cevrilir.
+function serializeWaiterCall(call: any) {
+  const raw = serializeDocument(call);
+  return {
+    ...raw,
+    createdAt: toIsoString(raw.createdAt as Date | string),
+  };
+}
+
 // Get active waiter calls (staff/manager)
 router.get("/waiter-calls", attachAuth, restrictTo("staff", "manager"), async (req: AuthRequest, res) => {
   try {
     const calls = await WaiterCallModel.find({ status: { $in: ["pending", "acknowledged"] } }).sort({ createdAt: -1 });
-    return res.json(calls.map((c) => serializeDocument(c)));
+    return res.json(calls.map((c) => serializeWaiterCall(c)));
   } catch (error) {
     console.error("Get waiter calls error:", error);
     return res.status(500).json({ message: await getSystemText("cagrilar-yuklenirken-hata-olustu") });
@@ -1249,7 +1258,7 @@ router.get("/waiter-calls/my", attachAuth, async (req: AuthRequest, res) => {
   try {
     const userId = req.authUser!._id.toString();
     const calls = await WaiterCallModel.find({ userId }).sort({ createdAt: -1 }).limit(20);
-    return res.json(calls.map((c) => serializeDocument(c)));
+    return res.json(calls.map((c) => serializeWaiterCall(c)));
   } catch (error) {
     console.error("Get my waiter calls error:", error);
     return res.status(500).json({ message: await getSystemText("cagrilariniz-yuklenirken-hata-olustu") });
@@ -1286,10 +1295,10 @@ router.post("/waiter-calls", attachAuth, async (req: AuthRequest, res) => {
       message: message || "",
       priority: priority || "normal",
       status: "pending",
-      createdAt: new Date().toISOString(),
+      createdAt: new Date(),
     });
 
-    return res.json(serializeDocument(call));
+    return res.json(serializeWaiterCall(call));
   } catch (error) {
     console.error("Create waiter call error:", error);
     return res.status(500).json({ message: await getSystemText("cagri-olusturulurken-hata-olustu") });
@@ -1317,7 +1326,7 @@ router.post("/waiter-calls/:id/acknowledge", attachAuth, restrictTo("staff", "ma
     call.acknowledgedAt = new Date().toISOString();
     await call.save();
 
-    return res.json(serializeDocument(call));
+    return res.json(serializeWaiterCall(call));
   } catch (error) {
     console.error("Acknowledge waiter call error:", error);
     return res.status(500).json({ message: await getSystemText("cagri-onaylanirken-hata-olustu") });
@@ -1343,7 +1352,7 @@ router.post("/waiter-calls/:id/complete", attachAuth, restrictTo("staff", "manag
     call.response = response || "";
     await call.save();
 
-    return res.json(serializeDocument(call));
+    return res.json(serializeWaiterCall(call));
   } catch (error) {
     console.error("Complete waiter call error:", error);
     return res.status(500).json({ message: await getSystemText("cagri-tamamlanirken-hata-olustu") });
@@ -1368,7 +1377,7 @@ router.post("/waiter-calls/:id/cancel", attachAuth, async (req: AuthRequest, res
     call.status = "cancelled";
     await call.save();
 
-    return res.json(serializeDocument(call));
+    return res.json(serializeWaiterCall(call));
   } catch (error) {
     console.error("Cancel waiter call error:", error);
     return res.status(500).json({ message: await getSystemText("cagri-iptal-edilirken-hata-olustu") });

@@ -101,7 +101,21 @@ const UserSchema = new mongoose.Schema(
     gender: { type: String, enum: ["female", "male"], default: undefined },
     email: { type: String, required: true, unique: true, index: true },
     password: { type: String, required: true },
-    phone: { type: String, default: "" },
+    // MP-2.14: telefon formati — route katmani rakamlari ayiklayip kaydeder;
+    // serif yalnizca normalize edilmis TR mobil numaralarini kabul eder.
+    phone: {
+      type: String,
+      default: "",
+      validate: {
+        validator: (v: string) =>
+          v === "" ||
+          (/^\d+$/.test(v) &&
+            ((v.length === 10 && v.startsWith("5")) ||
+              (v.length === 11 && v.startsWith("05")) ||
+              (v.length === 12 && v.startsWith("905")))),
+        message: "Telefon numarasi gecerli bir TR mobil numarasi olmalidir (orn. 05051234567)",
+      },
+    },
     birthDate: { type: String, default: "" },
     role: { type: String, enum: ["customer", "staff", "manager"], default: "customer" },
     sessionRole: { type: String, enum: ["customer", "staff", "manager"], default: null },
@@ -120,7 +134,8 @@ const UserSchema = new mongoose.Schema(
       default: 0,
       min: [0, "Bakiye negatif olamaz"],
     },
-    points: { type: Number, default: 0 },
+    // MP-2.14: sadakat puani alt siniri — negatif puan new-save'lerde reddedilir.
+    points: { type: Number, default: 0, min: [0, "Puan negatif olamaz"] },
     avatar: { type: String, default: "" },
     favorites: [{ type: String }],
     addresses: [AddressSchema],

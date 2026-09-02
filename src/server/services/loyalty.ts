@@ -205,16 +205,37 @@ export async function applyCompletedOrderLoyalty(order: OrderDocument) {
   );
 
   if (pointsAwarded > 0) {
-    user.points = Math.max(0, (user.points || 0) + pointsAwarded);
-    await user.save();
+    // MP-2.15: puan ekleme + siparişin işlendi olarak işaretlenmesi tek
+    // koşullu atomik update'te — iki eşzamanlı tamamlama isteği puanı
+    // iki kez veremez (loyaltyProcessed guard'ı sorgunun kendisinde).
+    const markedOrder = await OrderModel.findOneAndUpdate(
+      { _id: order._id, loyaltyProcessed: { $ne: true } },
+      { $set: { loyaltyProcessed: true, loyaltyPointsAwarded: pointsAwarded } },
+      { new: true },
+    );
+
+    if (!markedOrder) {
+      return {
+        pointsAwarded: order.loyaltyPointsAwarded || 0,
+      };
+    }
+
+    await UserModel.updateOne({ _id: order.userId }, { $inc: { points: pointsAwarded } });
+
+    order.loyaltyProcessed = true;
+    order.loyaltyPointsAwarded = pointsAwarded;
+
+    return {
+      pointsAwarded,
+    };
   }
 
   order.loyaltyProcessed = true;
-  order.loyaltyPointsAwarded = pointsAwarded;
+  order.loyaltyPointsAwarded = 0;
   await order.save();
 
   return {
-    pointsAwarded,
+    pointsAwarded: 0,
   };
 }
 
@@ -294,11 +315,29 @@ export async function applyActivePointRewardToOrder(
     };
   }
 
-  user.activePointReward = {
-    ...activePointReward,
-    remainingUses,
-  };
-  user.markModified("activePointReward");
+  // MP-2.15: remainingUses read-modify-write save() yerine koşullu atomik
+  // findOneAndUpdate ile düşürülür — sorgudaki guard, iki eşzamanlı siparişin
+  // aynı hak üzerinde çift harcama yapmasını (lost-update) engeller.
+  const atomicallyUpdatedUser = await UserModel.findOneAndUpdate(
+    {
+      _id: user._id,
+      "activePointReward.redemptionId": activePointReward.redemptionId,
+      "activePointReward.remainingUses": activePointReward.remainingUses,
+    },
+    { $set: { "activePointReward.remainingUses": remainingUses } },
+    { new: true },
+  );
+
+  if (!atomicallyUpdatedUser) {
+    // Hak arada değişti (süresi doldu / başka sipariş tüketti) — indirim
+    // uygulanmaz, sipariş kampanyasız devam eder.
+    return {
+      discountTotal: 0,
+      appliedCampaign: undefined,
+    };
+  }
+
+  user.activePointReward = atomicallyUpdatedUser.activePointReward;
 
   return {
     discountTotal: Number(discountTotal.toFixed(2)),
@@ -388,8 +427,6 @@ export async function redeemPointCampaign(user: UserDocument, campaignId: string
   const discountPercent =
     campaignType === "points_discount_product" ? Math.min(100, Math.max(0, campaign.value || 0)) : 100;
 
-  user.points = Math.max(0, (user.points || 0) - pointsCost);
-
   let order: OrderDocument | null = null;
   let remainingUses = usageLimit;
 
@@ -436,7 +473,7 @@ export async function redeemPointCampaign(user: UserDocument, campaignId: string
     remainingUses = 0;
   }
 
-  user.activePointReward = {
+  const nextActivePointReward = {
     redemptionId: randomUUID(),
     campaignId: campaign.id,
     campaignTitle: campaign.title,
@@ -453,11 +490,44 @@ export async function redeemPointCampaign(user: UserDocument, campaignId: string
     autoOrderId: order?._id.toString() || "",
   };
 
+  // MP-2.15: puan düşme + aktif hak yazma tek koşullu atomik update'te
+  // birleşir. Guard'lar: puan hâlâ yeterli VEYA hak zaten bu kullanıcıda
+  // yok (yarışta ikinci istek reddedilir, puan iki kez düşmez).
+  const redeemSet: Record<string, unknown> = {
+    activePointReward: nextActivePointReward,
+  };
   if (isPreSelected) {
-    user.selectedCampaign = null;
+    redeemSet.selectedCampaign = null;
+  }
+  const redeemUpdate: Record<string, unknown> = {
+    $set: redeemSet,
+  };
+
+  const redeemedUser = await UserModel.findOneAndUpdate(
+    {
+      _id: user._id,
+      points: { $gte: pointsCost },
+      $or: [
+        { activePointReward: null },
+        { activePointReward: { $exists: false } },
+        { "activePointReward.expiresAt": { $lte: new Date().toISOString() } },
+      ],
+    },
+    {
+      ...redeemUpdate,
+      // Puan 0'ın altına düşmez; negatif $inc guard'ın $gte koşuluyla imkânsız.
+      $inc: { points: -pointsCost },
+    },
+    { new: true },
+  );
+
+  if (!redeemedUser) {
+    throw new Error(await getSystemText("bu-kampanya-icin-yeterli-puan-yok"));
   }
 
-  await user.save();
+  user.points = redeemedUser.points;
+  user.activePointReward = redeemedUser.activePointReward;
+  user.selectedCampaign = redeemedUser.selectedCampaign;
 
   return {
     campaign,

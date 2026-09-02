@@ -13,6 +13,9 @@ const BalanceTopUpSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
+// MP-2.12: kullanıcının bakiye yükleme geçmişi zaman sırasıyla.
+BalanceTopUpSchema.index({ userId: 1, timestamp: -1 });
+
 export type BalanceTopUpDocument = mongoose.InferSchemaType<typeof BalanceTopUpSchema> & mongoose.Document;
 
 const BalanceTopUpModel =
