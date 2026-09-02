@@ -330,6 +330,60 @@ describe("POST /api/orders", () => {
     expect(response.status).toBe(400);
     expect(await OrderModel.countDocuments()).toBe(0);
   });
+
+  it("rejects a fractional or above-50 quantity with 400 (MP-2.5)", async () => {
+    const { token, userId } = await getTokenFor();
+    await UserModel.updateOne({ _id: userId }, { $set: { balance: 500 } });
+    const product = await ProductModel.create({ name: "Cay", price: 20, category: "icecek" });
+
+    const fractional = await request(app)
+      .post("/api/orders")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ items: [{ product: { id: product._id.toString() }, quantity: 1.5 }] });
+    expect(fractional.status).toBe(400);
+
+    const tooMany = await request(app)
+      .post("/api/orders")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ items: [{ product: { id: product._id.toString() }, quantity: 51 }] });
+    expect(tooMany.status).toBe(400);
+
+    expect(await OrderModel.countDocuments()).toBe(0);
+  });
+
+  it("accepts a valid quantity of 50 (MP-2.5 üst sınır)", async () => {
+    const { token, userId } = await getTokenFor();
+    await UserModel.updateOne({ _id: userId }, { $set: { balance: 500 } });
+    const product = await ProductModel.create({ name: "Cay", price: 10, category: "icecek" });
+
+    const response = await request(app)
+      .post("/api/orders")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ items: [{ product: { id: product._id.toString() }, quantity: 50 }] });
+
+    expect(response.status).toBe(201);
+    expect(response.body.order.items[0].quantity).toBe(50);
+    expect(response.body.order.total).toBe(500);
+  });
+
+  it("rejects more than 50 order lines with 400 (MP-2.5)", async () => {
+    const { token, userId } = await getTokenFor();
+    await UserModel.updateOne({ _id: userId }, { $set: { balance: 5000 } });
+    const product = await ProductModel.create({ name: "Cay", price: 10, category: "icecek" });
+
+    const items = Array.from({ length: 51 }, () => ({
+      product: { id: product._id.toString() },
+      quantity: 1,
+    }));
+
+    const response = await request(app)
+      .post("/api/orders")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ items });
+
+    expect(response.status).toBe(400);
+    expect(await OrderModel.countDocuments()).toBe(0);
+  });
 });
 
 describe("GET /api/orders", () => {
@@ -719,5 +773,247 @@ describe("POST /api/auth/login account lockout (MP-1.1)", () => {
     // Hayalet hesap icin DB'de kayit olusmaz — login yolu user olusturmaz.
     const count = await UserModel.countDocuments({ email: "ghost@test.com" });
     expect(count).toBe(0);
+  });
+});
+
+// --- MP-2.13: Manager listelerinde pagination ---
+
+describe("GET /api/users pagination (MP-2.13)", () => {
+  it("returns an array by default with X-Total-Count header (backward compatible)", async () => {
+    const { token: managerToken } = await createManagerAndGetToken();
+    await getTokenFor({ email: "sayfa1@test.com", username: "sayfa1" });
+
+    const response = await request(app)
+      .get("/api/users")
+      .set("Authorization", `Bearer ${managerToken}`);
+
+    expect(response.status).toBe(200);
+    expect(Array.isArray(response.body)).toBe(true);
+    expect(response.body.length).toBeGreaterThanOrEqual(2);
+    expect(response.headers["x-total-count"]).toBe(String(response.body.length));
+  });
+
+  it("supports ?page=&limit= with envelope for new clients", async () => {
+    const { token: managerToken } = await createManagerAndGetToken();
+    for (let i = 1; i <= 5; i += 1) {
+      await getTokenFor({ email: `sayfa_uye${i}@test.com`, username: `sayfa_uye${i}` });
+    }
+
+    const response = await request(app)
+      .get("/api/users?page=1&limit=3&envelope=1")
+      .set("Authorization", `Bearer ${managerToken}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.items).toHaveLength(3);
+    expect(response.body.page).toBe(1);
+    expect(response.body.limit).toBe(3);
+    expect(response.body.total).toBe(6); // manager + 5 yeni kullanıcı
+  });
+
+  it("caps limit at 200 and defaults to 50", async () => {
+    const { token: managerToken } = await createManagerAndGetToken();
+
+    const capped = await request(app)
+      .get("/api/users?limit=9999&envelope=1")
+      .set("Authorization", `Bearer ${managerToken}`);
+    expect(capped.body.limit).toBe(200);
+
+    const fallback = await request(app)
+      .get("/api/users?envelope=1")
+      .set("Authorization", `Bearer ${managerToken}`);
+    expect(fallback.body.limit).toBe(50);
+  });
+
+  it("serves the second page with correct offset", async () => {
+    const { token: managerToken } = await createManagerAndGetToken();
+    for (let i = 1; i <= 4; i += 1) {
+      await getTokenFor({ email: `sayfa2_uye${i}@test.com`, username: `sayfa2_uye${i}` });
+    }
+
+    const page1 = await request(app)
+      .get("/api/users?page=1&limit=3&envelope=1")
+      .set("Authorization", `Bearer ${managerToken}`);
+    const page2 = await request(app)
+      .get("/api/users?page=2&limit=3&envelope=1")
+      .set("Authorization", `Bearer ${managerToken}`);
+
+    expect(page1.status).toBe(200);
+    expect(page2.status).toBe(200);
+    expect(page2.body.items).toHaveLength(2); // 5 kullanıcı, limit 3 → 2. sayfada 2
+    const page1Ids = page1.body.items.map((u: any) => u.id ?? u._id);
+    const page2Ids = page2.body.items.map((u: any) => u.id ?? u._id);
+    expect(page2Ids.some((id: string) => page1Ids.includes(id))).toBe(false);
+  });
+});
+
+describe("GET /api/balance-top-ups pagination (MP-2.13)", () => {
+  it("requires manager role", async () => {
+    const { token } = await getTokenFor();
+
+    const response = await request(app)
+      .get("/api/balance-top-ups")
+      .set("Authorization", `Bearer ${token}`);
+
+    expect(response.status).toBe(403);
+  });
+
+  it("returns a paginated envelope with X-Total-Count", async () => {
+    const { token: managerToken, managerId } = await createManagerAndGetToken();
+
+    for (let i = 0; i < 4; i += 1) {
+      await BalanceTopUpModel.create({
+        userId: managerId,
+        userName: "Yonetici Test",
+        userEmail: "yonetici@test.com",
+        amount: 100,
+        creditedAmount: 100,
+        bonusAmount: 0,
+        timestamp: new Date(Date.now() + i),
+      });
+    }
+
+    const response = await request(app)
+      .get("/api/balance-top-ups?page=1&limit=2&envelope=1")
+      .set("Authorization", `Bearer ${managerToken}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.items).toHaveLength(2);
+    expect(response.body.page).toBe(1);
+    expect(response.body.limit).toBe(2);
+    expect(response.body.total).toBe(4);
+    expect(response.headers["x-total-count"]).toBe("4");
+  });
+});
+
+// --- MP-2.15: Atomik iade ---
+
+describe("PATCH /api/orders/:id/status refund (MP-2.15)", () => {
+  it("refunds the balance exactly once on rejection; a second reject attempt fails", async () => {
+    const { token: managerToken } = await createManagerAndGetToken();
+    const { token, userId } = await getTokenFor();
+    await UserModel.updateOne({ _id: userId }, { $set: { balance: 500 } });
+    const product = await ProductModel.create({ name: "Iade Kahve", price: 120, category: "kahve" });
+
+    const created = await request(app)
+      .post("/api/orders")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ items: [{ product: { id: product._id.toString() }, quantity: 2 }] });
+    expect(created.status).toBe(201);
+    expect(created.body.user.balance).toBe(260); // 500 - 240
+
+    const orderId = created.body.order._id ?? created.body.order.id;
+
+    const rejected = await request(app)
+      .patch(`/api/orders/${orderId}/status`)
+      .set("Authorization", `Bearer ${managerToken}`)
+      .send({ status: "rejected", cancelReason: "test" });
+    expect(rejected.status).toBe(200);
+
+    const afterRefund = await UserModel.findById(userId);
+    expect(afterRefund!.balance).toBe(500); // 260 + 240 iade
+
+    // Aynı order ikinci kez reddedilemez — bakiye tekrar iade edilmez.
+    const rejectedAgain = await request(app)
+      .patch(`/api/orders/${orderId}/status`)
+      .set("Authorization", `Bearer ${managerToken}`)
+      .send({ status: "rejected", cancelReason: "tekrar" });
+    expect(rejectedAgain.status).toBe(400);
+
+    const afterSecondAttempt = await UserModel.findById(userId);
+    expect(afterSecondAttempt!.balance).toBe(500);
+  });
+
+  it("awards loyalty points exactly once even for concurrent completion attempts", async () => {
+    const { token: managerToken } = await createManagerAndGetToken();
+    const { token, userId } = await getTokenFor();
+    await UserModel.updateOne({ _id: userId }, { $set: { balance: 500 } });
+    const product = await ProductModel.create({ name: "Puan Kahve", price: 100, category: "kahve" });
+
+    const created = await request(app)
+      .post("/api/orders")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ items: [{ product: { id: product._id.toString() }, quantity: 1 }] });
+    expect(created.status).toBe(201);
+
+    const orderId = created.body.order._id ?? created.body.order.id;
+
+    // pending → preparing → ready geçişleri
+    await request(app)
+      .patch(`/api/orders/${orderId}/status`)
+      .set("Authorization", `Bearer ${managerToken}`)
+      .send({ status: "preparing" });
+    await request(app)
+      .patch(`/api/orders/${orderId}/status`)
+      .set("Authorization", `Bearer ${managerToken}`)
+      .send({ status: "ready" });
+
+    const before = await UserModel.findById(userId);
+    const pointsBefore = before!.points;
+
+    // İki eşzamanlı tamamlama isteği — loyaltyProcessed guard'ı atomik.
+    const [a, b] = await Promise.all([
+      request(app).patch(`/api/orders/${orderId}/status`)
+        .set("Authorization", `Bearer ${managerToken}`)
+        .send({ status: "completed" }),
+      request(app).patch(`/api/orders/${orderId}/status`)
+        .set("Authorization", `Bearer ${managerToken}`)
+        .send({ status: "completed" }),
+    ]);
+
+    // Yarışta kazanan 200 döner; kaybeden atomik status guard'ına takılır
+    // ve 409 (çakışma) alır — puan tek sefer verilir.
+    expect([a.status, b.status].sort()).toEqual([200, 409]);
+
+    const after = await UserModel.findById(userId);
+    // Ürün başına 100 puan (LOYALTY_POINTS_PER_COMPLETED_ITEM), total 100/10=10 → max(100, 10) = 100.
+    const expectedAward = 100;
+    expect(after!.points).toBe(pointsBefore + expectedAward);
+  });
+});
+
+// --- MP-2.5: Masa siparişi bakiye kontrolü ---
+
+describe("POST /api/orders table session balance guard (MP-2.5)", () => {
+  it("rejects a table order whose accumulated debt exceeds the participant balance", async () => {
+    const { token: managerToken } = await createManagerAndGetToken();
+    const { token, userId } = await getTokenFor();
+    await UserModel.updateOne({ _id: userId }, { $set: { balance: 150 } });
+    const product = await ProductModel.create({ name: "Masa Kahve", price: 100, category: "kahve" });
+
+    const table = await request(app)
+      .post("/api/tables/initialize")
+      .set("Authorization", `Bearer ${managerToken}`);
+    expect(table.status).toBe(200);
+
+    const joined = await request(app)
+      .post("/api/table-sessions/join-or-create")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ tableNumber: "1" });
+    expect(joined.status).toBe(201);
+
+    const sessionToken = joined.body.session.sessionToken;
+
+    // 100'lük masa siparişi — bakiye 150 olduğu için geçmeli.
+    const first = await request(app)
+      .post("/api/orders")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ items: [{ product: { id: product._id.toString() }, quantity: 1 }], tableSessionToken: sessionToken });
+    expect(first.status).toBe(201);
+
+    // Borç 100; bakiye 150. 60'lık ikinci sipariş toplam borcu 160 yapar → 400.
+    const cheapProduct = await ProductModel.create({ name: "Masa Cay", price: 60, category: "icecek" });
+    const second = await request(app)
+      .post("/api/orders")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ items: [{ product: { id: cheapProduct._id.toString() }, quantity: 1 }], tableSessionToken: sessionToken });
+    expect(second.status).toBe(400);
+
+    // 50'lik sipariş ise borcu 150 yapar → bakiyeye eşit, geçmeli.
+    const fittingProduct = await ProductModel.create({ name: "Masa Su", price: 50, category: "icecek" });
+    const third = await request(app)
+      .post("/api/orders")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ items: [{ product: { id: fittingProduct._id.toString() }, quantity: 1 }], tableSessionToken: sessionToken });
+    expect(third.status).toBe(201);
   });
 });
