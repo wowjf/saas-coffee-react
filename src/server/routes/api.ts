@@ -3515,7 +3515,11 @@ router.post("/table-sessions/leave", attachAuth, async (req, res, next) => {
 
 // Import new feature routes
 import newFeaturesRouter from "./new-features.js";
+// MP-3.1: SSE realtime kanalı (GET /api/events) — EventSource header
+// gönderemediği için token sorgu parametresi ile de doğrulanır.
+import eventsRouter from "./events.js";
 import { getSystemText } from "../services/systemTexts";
 router.use(newFeaturesRouter);
+router.use(eventsRouter);
 
 export default router;

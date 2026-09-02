@@ -9,7 +9,7 @@ export interface AuthRequest extends Request {
   authRole?: UserRole;
 }
 
-function getEffectiveRole(user: any): UserRole {
+export function getEffectiveRole(user: any): UserRole {
   const accountRole = (user?.role || "customer") as UserRole;
 
   if (accountRole === "customer") {
