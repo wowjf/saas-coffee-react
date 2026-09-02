@@ -14,7 +14,7 @@ services:
       PORT: 3000
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required - set it in your .env file (generate with: openssl rand -hex 32)}
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:?ALLOWED_ORIGINS is required in production - list explicit domains, e.g. https://bancho.cafe,https://www.bancho.cafe}
-      MONGODB_URI: mongodb://mongodb:27017/cafe_db
+      MONGODB_URI: mongodb://root:${MONGO_INITDB_ROOT_PASSWORD}@mongodb:27017/cafe_db?authSource=admin
       ENABLE_SEED: ${ENABLE_SEED:-true}
       # Guvenlik (MP-0.2 / MP-0.7): bootstrap yonetici kimlik bilgisinde sabit
       # fallback yok — .env doldurulmali (sifre icin zorunlu, bkz. :?).
@@ -34,10 +34,13 @@ services:
     restart: unless-stopped
     expose:
       - "27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME:?MONGO_INITDB_ROOT_USERNAME is required - set it in your .env file}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD:?MONGO_INITDB_ROOT_PASSWORD is required - set a strong password in your .env file}
     volumes:
       - mongodb_data:/data/db
     healthcheck:
-      test: ["CMD-SHELL", "echo 'db.runCommand({ ping: 1 }).ok' | mongosh localhost:27017/test --quiet"]
+      test: ["CMD-SHELL", "mongosh -u $MONGO_INITDB_ROOT_USERNAME -p $MONGO_INITDB_ROOT_PASSWORD --eval 'db.adminCommand({ping:1})'"]
       interval: 10s
       timeout: 5s
       retries: 5

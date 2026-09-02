@@ -162,7 +162,9 @@ Kısayol olarak `npm run dev:full` = `db:start` + `dev` tek komutta çalıştır
 |---|---|---|
 | `JWT_SECRET` | **Evet** | Oturum token'larını imzalayan gizli anahtar. **Tanımsızsa uygulama açılmaz.** Üretimde mutlaka `openssl rand -hex 32` benzeri rastgele bir değer kullanın. |
 | `NODE_ENV` | — | `production` yapılınca: bellek-içi DB yasağı, CORS sıkılaştırması, statik `dist/` sunumu devreye girer. |
-| `MONGODB_URI` | — | Varsayılan `mongodb://localhost:27017/cafe_db`. Docker içinde `mongodb://mongodb:27017/cafe_db`. |
+| `MONGODB_URI` | — | Varsayılan `mongodb://localhost:27017/cafe_db`. Docker içinde `mongodb://root:<password>@mongodb:27017/cafe_db?authSource=admin`. |
+| `MONGO_INITDB_ROOT_USERNAME` | Docker'da **evet** | Docker MongoDB kök kullanıcı adı (varsayılan `root`). |
+| `MONGO_INITDB_ROOT_PASSWORD` | Docker'da **evet** | Docker MongoDB kök parolası. Üretimde güçlü bir parola belirleyin. |
 | `ALLOWED_ORIGINS` | Üretimde **evet** | Virgülle ayrılmış açık domain listesi. Üretimde joker `*` kabul edilmez; tanımsızsa uygulama açılmaz. Örn: `https://bancho.cafe,https://www.bancho.cafe` |
 | `PORT` / `HOST` | — | Varsayılan `3000` / `0.0.0.0`. |
 | `ENABLE_SEED` | — | İlk açılışta örnek veri yüklenmesini kontrol eder (varsayılan `true`). |
