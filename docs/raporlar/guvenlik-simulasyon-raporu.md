@@ -1,5 +1,7 @@
 # Bancho Cafe — Sızma Simülasyonu Güvenlik Raporu (Dinamik Denetim)
 
+> **DURUM (03.09.2026):** Bu rapordaki tüm KRİTİK (S-K1..K7), ORTA (S-O1..O12) ve DÜŞÜK (S-D1..D3) bulgular düzeltildi ve sim ortamında doğrulandı. Yarış senaryoları `src/server/routes/security-regression.test.ts` içinde regression testleridir. Ayrıntı: MASTER-PLAN MP-0.10 durum güncellemesi.
+
 - **Denetim tarihi:** 03.09.2026
 - **Yöntem:** Statik denetimin (`guvenlik-raporu.md`, 02.09.2026) üzerine **dinamik sızma testi**. Gerçek API kod tabanı (`src/server/routes/api.ts` + `new-features.ts`), izole simülasyon sunucusunda (`scripts/sim-server.ts`, `:3999`, bellek-içi MongoDB) çalıştırıldı; 4 paralel saldırı ajanı toplam ~230 HTTP senaryosu koştu (iş mantığı/stok, para akışı/yarış, kimlik doğrulama/IDOR, girdi fuzz/enjeksiyon).
 - **Doğrulama:** Kritik bulgular koordinatör tarafından temiz tohumda **bizzat yeniden üretilerek** teyit edildi (aşağıda ✓ DOĞRULANDI işaretli).

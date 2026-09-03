@@ -152,8 +152,7 @@ Bunun altında iki büyük yapısal tema yatıyor: (1) **iş mantığının rout
 - **S-K2:** Ödenmiş masa siparişi reddedilince iade yok (para kayboluyor). **S-K6:** paralel `pay`/`leave` çift kesim. **S-K7:** abonelik yarışında iadesiz kesim. **S-K3:** no-pay "yemek-kaçağı" döngüsü (ürün + sadakat puanı bedava).
 - **Yapılacak:** Yukarıdaki sırayla (etki/maliyet) düzelt; her biri için sim ortamında (`scripts/sim-server.ts`) yarış senaryosunu regression testine çevir.
 - **Kabul:** Sim sunucusunda aynı saldırı scriptleri tümünü reddediyor; kritik yarış senaryoları CI testlerinde.
-
----
+- **DURUM GÜNCELLEMESI (03.09):** **TAMAMLANDI.** Tüm KRİTİK'ler (S-K1..K7) + ORTA batch (S-O1..O12: envanter hareket/PATCH doğrulaması, `syncProductStockFlags` yeniden açma dalı `inStockAutoClosed` işaretiyle, sipariş anı malzeme kontrolü, note 500 krş sınırı, image data-URI yasağı + 100KB cap, 5 alanda `sanitizePlainText`, e-posta değişiminde `currentPassword`, register tek 409 mesajı) + DÜŞÜK'ler (S-D1/D2/D3: hareket/enum/uzunluk doğrulamaları) düzeltildi. Sim sunucusunda 27/27 canlı doğrulama PASS; yarış senaryoları `src/server/routes/security-regression.test.ts` altında 17 vitest testine çevrildi (246/246 toplam test, tsc + build temiz). S-K3 için ayrıca `/users/:id/table-debt/settle` (manager) tahsilat ucu eklendi.
 
 ## 2. P1 — İlk Hafta
 

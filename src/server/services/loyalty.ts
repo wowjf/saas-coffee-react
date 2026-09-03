@@ -26,7 +26,10 @@ type LoyaltyQrTokenPayload = {
 };
 
 function getLoyaltyJwtSecret() {
-  return process.env.JWT_SECRET!;
+  // S-K1 (MP-0.10): sadakat QR'ı oturum JWT'sinden ayrı anahtarla imzalanır.
+  // LOYALTY_JWT_SECRET tanımlı değilse JWT_SECRET ile geriye dönük uyumluluk
+  // korunur; ana koruma attachAuth'deki purpose reddidir.
+  return process.env.LOYALTY_JWT_SECRET || process.env.JWT_SECRET!;
 }
 
 export function isCampaignActive(campaign: Campaign | null) {

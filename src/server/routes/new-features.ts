@@ -14,7 +14,7 @@ import UserModel from "../models/User";
 import ProductModel from "../models/Product";
 import OrderModel from "../models/Order";
 import TableModel from "../models/Table";
-import { serializeDocument, toIsoString } from "../utils";
+import { serializeDocument, sanitizePlainText, toIsoString } from "../utils";
 import {
   getLeaderboard,
   getLeaderboardCooldownRemainingMs,
@@ -32,6 +32,7 @@ import {
 import { publishToManagers, publishToUser } from "../services/eventBus.js";
 import { getSystemText } from "../services/systemTexts";
 import { calculateCouponDiscount } from "../services/coupon.js";
+import { syncProductStockFlags } from "../services/inventory.js";
 
 // MP-0.5: kaydedilen tüm async handler'lar asyncHandler ile sarmalanır.
 const router = autoAsyncHandlers(Router());
@@ -129,7 +130,7 @@ router.post("/reviews", attachAuth, async (req: AuthRequest, res) => {
     // MP-1.4: dış girdiler normalleştirilir — sayı olmayan puan ve nesne
     // yorum gövdesi belgeye operatör olarak sızamaz.
     const rating = Number(req.body?.rating);
-    const comment = typeof req.body?.comment === "string" ? req.body.comment : "";
+    const comment = sanitizePlainText(typeof req.body?.comment === "string" ? req.body.comment : "");
 
     if (!orderId || !productId || !Number.isFinite(rating)) {
       return res.status(400).json({ message: await getSystemText("eksik-bilgi") });
@@ -203,7 +204,7 @@ router.post("/reviews", attachAuth, async (req: AuthRequest, res) => {
 router.patch("/reviews/:id/response", attachAuth, restrictTo("manager"), async (req: AuthRequest, res) => {
   try {
     const { id } = req.params;
-    const { response } = req.body;
+    const response = sanitizePlainText(String(req.body?.response ?? "")).slice(0, 1000);
 
     const review = await ReviewModel.findByIdAndUpdate(
       id,
@@ -846,15 +847,30 @@ router.post("/subscriptions/subscribe", attachAuth, async (req: AuthRequest, res
       endDate.setFullYear(endDate.getFullYear() + 1);
     }
 
-    const subscription = await SubscriptionModel.create({
-      userId,
-      planId: plan._id.toString(),
-      planName: plan.name,
-      status: "active",
-      startDate: startDate.toISOString(),
-      endDate: endDate.toISOString(),
-      autoRenew: true,
-    });
+    let subscription;
+    try {
+      subscription = await SubscriptionModel.create({
+        userId,
+        planId: plan._id.toString(),
+        planName: plan.name,
+        status: "active",
+        startDate: startDate.toISOString(),
+        endDate: endDate.toISOString(),
+        autoRenew: true,
+      });
+    } catch (createError) {
+      // S-K7 (MP-0.10): eşzamanlı ikinci istek bakiyeyi düşüp create'te
+      // unique userId index'ine takılabilir — düşülen para telafi edilmeden
+      // 500 dönülürse para kaybolur.
+      await UserModel.updateOne({ _id: userId }, { $inc: { balance: planPrice } });
+      console.error("Subscribe create error (refund applied):", createError);
+
+      const alreadyActive = await SubscriptionModel.findOne({ userId, status: "active" });
+      if (alreadyActive) {
+        return res.status(400).json({ message: await getSystemText("zaten-aktif-bir-aboneliginiz-var") });
+      }
+      throw createError;
+    }
 
     // Update user with subscription ID
     const userWithSubscription = await UserModel.findByIdAndUpdate(
@@ -996,7 +1012,7 @@ router.post("/chat/:roomId/message", attachAuth, async (req: AuthRequest, res) =
     const { roomId } = req.params;
     // MP-1.4: mesaj gövdesi String() ile normalleştirilir — nesne girdisi
     // belgeye operatör olarak sızamaz.
-    const message = String(req.body?.message ?? "");
+    const message = sanitizePlainText(String(req.body?.message ?? ""));
     const userId = req.authUser!._id.toString();
     const userName = `${req.authUser!.name} ${req.authUser!.surname}`;
     const userRole = req.authUser!.role;
@@ -1293,13 +1309,25 @@ router.post("/waiter-calls", attachAuth, async (req: AuthRequest, res) => {
     const tableNumber = String(req.body?.tableNumber ?? "").trim();
     const tableSessionToken = String(req.body?.tableSessionToken ?? "");
     const type = String(req.body?.type ?? "");
-    const message = String(req.body?.message ?? "");
+    const message = sanitizePlainText(String(req.body?.message ?? ""));
     const priority = String(req.body?.priority ?? "normal");
     const userId = req.authUser!._id.toString();
     const userName = `${req.authUser!.name} ${req.authUser!.surname}`;
 
     if (!tableNumber || !type) {
       return res.status(400).json({ message: await getSystemText("eksik-bilgi") });
+    }
+
+    // S-D1 (MP-0.10): type/priority enumları şemaya ulaşmadan 400 ile
+    // reddedilir (CastError 500 döndürüyordu); masa adı da sınırlanır.
+    if (!["bill", "help", "complaint", "order"].includes(type)) {
+      return res.status(400).json({ message: "Geçersiz çağrı türü (bill/help/complaint/order)." });
+    }
+    if (!["normal", "urgent"].includes(priority)) {
+      return res.status(400).json({ message: "Geçersiz öncelik (normal/urgent)." });
+    }
+    if (tableNumber.length > 20) {
+      return res.status(400).json({ message: "Masa numarası en fazla 20 karakter olabilir." });
     }
 
     // MP-2.6: garson çağrısı notu en fazla 300 karakter olabilir.
@@ -1470,10 +1498,33 @@ function pickInventoryFields(body: Record<string, unknown>) {
   return picked;
 }
 
+// S-O3 (MP-0.10): envanter sayısal alanları normalleştirir — şema min
+// doğrulaması findByIdAndUpdate'te runValidators olmadan çalışmaz; string
+// "5" veya negatif değer bu yüzden update'te geçebilirdi.
+const INVENTORY_NUMBER_FIELDS = ["currentStock", "minStock", "maxStock", "reorderPoint", "costPerUnit"] as const;
+
+function normalizeInventoryNumbers(picked: Record<string, unknown>): string | null {
+  for (const field of INVENTORY_NUMBER_FIELDS) {
+    if (picked[field] === undefined) {
+      continue;
+    }
+    const parsed = typeof picked[field] === "number" ? picked[field] : Number(picked[field]);
+    if (typeof picked[field] === "boolean" || !Number.isFinite(parsed) || parsed < 0 || parsed > 1_000_000) {
+      return field;
+    }
+    picked[field] = parsed;
+  }
+  return null;
+}
+
 // Create inventory item (manager)
 router.post("/inventory", attachAuth, restrictTo("manager"), async (req: AuthRequest, res) => {
   try {
     const itemData = pickInventoryFields(req.body ?? {});
+    const invalidField = normalizeInventoryNumbers(itemData);
+    if (invalidField) {
+      return res.status(400).json({ message: `Geçersiz ${invalidField} değeri (0 veya üzeri bir sayı olmalı).` });
+    }
     itemData.movements = [];
     itemData.createdAt = new Date().toISOString();
 
@@ -1489,10 +1540,21 @@ router.post("/inventory", attachAuth, restrictTo("manager"), async (req: AuthReq
 router.patch("/inventory/:id", attachAuth, restrictTo("manager"), async (req: AuthRequest, res) => {
   try {
     const { id } = req.params;
-    const item = await InventoryItemModel.findByIdAndUpdate(id, { $set: pickInventoryFields(req.body ?? {}) }, { new: true });
+    const updates = pickInventoryFields(req.body ?? {});
+    const invalidField = normalizeInventoryNumbers(updates);
+    if (invalidField) {
+      return res.status(400).json({ message: `Geçersiz ${invalidField} değeri (0 veya üzeri bir sayı olmalı).` });
+    }
+    const item = await InventoryItemModel.findByIdAndUpdate(id, { $set: updates }, { new: true });
 
     if (!item) {
       return res.status(404).json({ message: await getSystemText("urun-bulunamadi") });
+    }
+
+    // S-O4a: stok PATCH'i sonrası ürün bayrakları yeniden senkronlanır —
+    // malzemesi geri gelen otomatik-kapatılmış ürünler tekrar satışa açılır.
+    if (updates.currentStock !== undefined && item) {
+      await syncProductStockFlags([item.name]);
     }
 
     return res.json(serializeDocument(item));
@@ -1522,8 +1584,16 @@ router.post("/inventory/:id/movement", attachAuth, restrictTo("staff", "manager"
     const userId = req.authUser!._id.toString();
     const userName = `${req.authUser!.name} ${req.authUser!.surname}`;
 
-    if (!type || !quantity) {
-      return res.status(400).json({ message: await getSystemText("eksik-bilgi") });
+    // S-O1/O2/D2/D3 (MP-0.10): hareket girdisi doğrulanır — type whitelist,
+    // miktar pozitif sonlu sayı ve makul üst sınır. Daha önce negatif "out"
+    // stoğu ARTIRIYOR, string miktar JS birleştirme yapıyordu.
+    const movementType = String(type || "");
+    if (!["in", "out", "adjustment"].includes(movementType)) {
+      return res.status(400).json({ message: "Geçersiz hareket türü (in/out/adjustment)." });
+    }
+    const qty = Number(quantity);
+    if (typeof quantity === "boolean" || !Number.isFinite(qty) || qty <= 0 || qty > 1_000_000) {
+      return res.status(400).json({ message: "Miktar 0'dan büyük geçerli bir sayı olmalıdır." });
     }
 
     const item = await InventoryItemModel.findById(id);
@@ -1532,8 +1602,8 @@ router.post("/inventory/:id/movement", attachAuth, restrictTo("staff", "manager"
     }
 
     const movement = {
-      type,
-      quantity,
+      type: movementType,
+      quantity: qty,
       reason: reason || "",
       performedBy: userId,
       performedByName: userName,
@@ -1546,19 +1616,27 @@ router.post("/inventory/:id/movement", attachAuth, restrictTo("staff", "manager"
     item.movements.push(movement as any);
 
     // Update current stock
-    if (type === "in") {
-      item.currentStock += quantity;
-    } else if (type === "out") {
-      item.currentStock = Math.max(0, item.currentStock - quantity);
-    } else if (type === "adjustment") {
-      item.currentStock = quantity;
+    if (movementType === "in") {
+      item.currentStock = Number((item.currentStock + qty).toFixed(3));
+    } else if (movementType === "out") {
+      item.currentStock = Math.max(0, Number((item.currentStock - qty).toFixed(3)));
+    } else if (movementType === "adjustment") {
+      item.currentStock = qty;
     }
 
-    if (type === "in") {
+    if (movementType === "in") {
       item.lastRestocked = movement.timestamp;
     }
 
     await item.save();
+
+    // S-O4a (MP-0.10): stok hareketi ürün satışa açıklığını değiştirebilir —
+    // malzeme geri gelen/tükenen ürünler senkron ile açılır/kapanır.
+    try {
+      await syncProductStockFlags([item.name]);
+    } catch (syncError) {
+      console.error("Stock flag sync after movement error:", syncError);
+    }
 
     return res.json(serializeDocument(item));
   } catch (error) {
@@ -1673,7 +1751,7 @@ router.put("/system-texts/:key", attachAuth, restrictTo("manager"), async (req: 
       return res.status(404).json({ message: "Sistem metni bulunamadi." });
     }
 
-    const value = String(req.body.value ?? "").slice(0, 500);
+    const value = sanitizePlainText(String(req.body.value ?? "")).slice(0, 500);
 
     if (!value.trim()) {
       return res.status(400).json({ message: "Metin bos olamaz." });

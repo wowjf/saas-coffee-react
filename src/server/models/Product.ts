@@ -10,6 +10,11 @@ const ProductSchema = new mongoose.Schema(
     description: { type: String, default: "" },
     image: { type: String, default: "" },
     inStock: { type: Boolean, default: true },
+    // S-O4a (MP-0.10): inStock=false değerinin envanter senkronu tarafından
+    // mı yoksa manuel karar tarafından mı kapatıldığını ayırır. true iken
+    // syncProductStockFlags stoğu geri gelen ürünü yeniden açabilir;
+    // manuel kapatmada kalır.
+    inStockAutoClosed: { type: Boolean, default: false },
     ingredients: [{ type: String }],
     preparationTime: { type: Number, default: 5 }, // in minutes
     averageRating: { type: Number, default: 0 },

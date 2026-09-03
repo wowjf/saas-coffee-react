@@ -17,7 +17,7 @@ import CategoryModel from "../models/Category";
 import ChangeLogModel from "../models/ChangeLog";
 import StaffModel from "../models/Staff";
 import BalanceTopUpModel from "../models/BalanceTopUp";
-import { normalizeEmail, serializeDocument, toIsoString } from "../utils";
+import { normalizeEmail, serializeDocument, toIsoString, sanitizePlainText } from "../utils";
 import TableModel from "../models/Table";
 import TableSessionModel from "../models/TableSession";
 import ReviewModel from "../models/Review";
@@ -30,6 +30,7 @@ import ReservationModel from "../models/Reservation";
 import WaiterCallModel from "../models/WaiterCall";
 // A2: sipariş tamamlamada envanter stok düşümü.
 import { decrementInventoryForOrder, syncProductStockFlags } from "../services/inventory.js";
+import InventoryItemModel from "../models/InventoryItem";
 // B4: aktif abonelik indiriminin siparişe uygulanması.
 import { applySubscriptionDiscountToOrder } from "../services/subscriptionDiscount.js";
 import PushSubscriptionModel from "../models/PushSubscription.js";
@@ -235,8 +236,23 @@ function isImageScope(value: string): value is ImageScope {
   return ["avatar", "category", "product", "campaign"].includes(value);
 }
 
+// S-O9 (MP-0.10): görsel alanı yalnızca yönetilen yol/URL kabul eder.
+// Inline data-URI reddedilir — kalıcı görseller /uploads akışından (WebP
+// dönüşümlü) gelmelidir; base64 gövde buradan DB'ye sızamaz.
+const MAX_IMAGE_VALUE_LENGTH = 100_000;
+
 function normalizeImageValue(value: unknown) {
-  return typeof value === "string" ? value.trim() : "";
+  if (typeof value !== "string") {
+    return "";
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return "";
+  }
+  if (trimmed.startsWith("data:")) {
+    return "";
+  }
+  return trimmed.slice(0, MAX_IMAGE_VALUE_LENGTH);
 }
 
 function normalizeAddresses(value: unknown) {
@@ -793,6 +809,18 @@ router.post("/auth/register", async (req, res, next) => {
       return res.status(400).json({ message: "Ad, soyad, kullanıcı adı, cinsiyet, e-posta, şifre, telefon ve doğum tarihi alanları zorunludur." });
     }
 
+    // S-D1 (MP-0.10): kayıt alan uzunlukları — 5000 karakterlik ad/soyad
+    // kabul ediliyordu.
+    if (name.length > 60 || surname.length > 60) {
+      return res.status(400).json({ message: "Ad ve soyad en fazla 60 karakter olabilir." });
+    }
+    if (email.length > 254) {
+      return res.status(400).json({ message: await getSystemText("gecerli-bir-e-posta-adresi-giriniz") });
+    }
+    if (password.length > 128) {
+      return res.status(400).json({ message: "Şifre en fazla 128 karakter olabilir." });
+    }
+
     const usernameRegex = /^[a-z0-9_]{3,20}$/;
     if (!usernameRegex.test(username)) {
       return res.status(400).json({ message: "Kullanıcı adı 3-20 karakter arasında olmalı, yalnızca küçük harf, rakam ve alt çizgi içerebilir." });
@@ -836,14 +864,13 @@ router.post("/auth/register", async (req, res, next) => {
       return res.status(400).json({ message: await getSystemText("lutfen-gercekci-bir-dogum-tarihi-giriniz-yas-12-100-arasinda-olmalidir") });
     }
 
+    // S-O12 (MP-0.10): çakışma mesajları teklenir — "bu kullanıcı adı mı
+    // bu e-posta mı alınmış" ayrımı, dışarıdaki birine kayıtlı hesap
+    // envanteri (username/email taraması) sağlıyordu.
     const existingUsername = await UserModel.findOne({ username });
-    if (existingUsername) {
-      return res.status(409).json({ message: "Bu kullanıcı adı zaten başka bir kullanıcı tarafından alınmış." });
-    }
-
     const existingEmail = await UserModel.findOne({ email });
-    if (existingEmail) {
-      return res.status(409).json({ message: await getSystemText("bu-e-posta-zaten-kullanimda") });
+    if (existingUsername || existingEmail) {
+      return res.status(409).json({ message: await getSystemText("bu-bilgilerle-iliskili-bir-hesap-zaten-mevcut") });
     }
 
     // Guvenlik (MP-0.2): kayitta rol her zaman customer'dir. Ayricalikli roller
@@ -1147,7 +1174,18 @@ router.patch("/users/me", attachAuth, async (req, res) => {
       if (!emailRegex.test(trimmed)) {
         return res.status(400).json({ message: await getSystemText("gecerli-bir-e-posta-adresi-giriniz") });
       }
-      updates.email = normalizeEmail(trimmed);
+      const nextEmail = normalizeEmail(trimmed);
+      // S-O11 (MP-0.10): e-posta değişimi hesabın kurtarma kimliğidir —
+      // mevcut şifre doğrulanmadan değiştirilemez. Ele geçen kısa ömürlü
+      // bir tokenla kalıcı hesap ele geçirme önlenir.
+      if (nextEmail !== req.authUser.email) {
+        const currentPassword = typeof body.currentPassword === "string" ? body.currentPassword : "";
+        const valid = currentPassword && (await req.authUser.comparePassword(currentPassword));
+        if (!valid) {
+          return res.status(403).json({ message: await getSystemText("mevcut-sifre-hatali") });
+        }
+      }
+      updates.email = nextEmail;
     }
 
     if ("avatar" in body) {
@@ -1525,7 +1563,10 @@ router.post("/users/me/password", attachAuth, async (req, res, next) => {
 // (Iyzico/Stripe) entegrasyonu gelene kadar musteri tarafi yukleme akisi
 // tamamen kapalidir. Bakiye yukleme yalnizca kasa/personel uzerinden
 // POST /users/:id/balance ile yapilir.
-router.post("/users/me/balance", attachAuth, restrictTo("staff", "manager"), async (req, res) => {
+// S-K5 (MP-0.10): staff da kendi hesabina yukleyemez — personel kasada
+// musteriye yuklerken "/:id/balance" ucunu kullanir; self top-up karşılıksız
+// para basma kapısıydı.
+router.post("/users/me/balance", attachAuth, restrictTo("manager"), async (req, res) => {
   if (!req.authUser) {
     return res.status(401).json({ message: await getSystemText("oturum-gerekli") });
   }
@@ -1544,8 +1585,13 @@ router.post("/users/me/balance", attachAuth, restrictTo("staff", "manager"), asy
 
   const totalCredited = Math.round((creditedAmount + bonusAmount) * 100) / 100;
 
-  req.authUser.balance = Math.max(0, req.authUser.balance + totalCredited);
-  await req.authUser.save();
+  // S-K4 (MP-0.10): atomik $inc — read-modify-write save() paralel yukleme
+  // ve siparis dusumleriyle lost-update yapiyordu (para buharlasiyordu).
+  const updatedUser = await UserModel.findOneAndUpdate(
+    { _id: req.authUser._id },
+    { $inc: { balance: totalCredited } },
+    { new: true },
+  );
 
   await BalanceTopUpModel.create({
     userId: req.authUser._id.toString(),
@@ -1557,7 +1603,7 @@ router.post("/users/me/balance", attachAuth, restrictTo("staff", "manager"), asy
     timestamp: new Date(),
   });
 
-  return res.json({ user: serializeUser(req.authUser) });
+  return res.json({ user: serializeUser(updatedUser ?? req.authUser) });
 });
 
 router.post("/users/:id/balance", attachAuth, restrictTo("staff", "manager"), async (req, res, next) => {
@@ -1580,8 +1626,13 @@ router.post("/users/:id/balance", attachAuth, restrictTo("staff", "manager"), as
     const { revenueAmount, bonusAmount } = await resolveBalanceTopUpAmounts(user, creditedAmount);
     const totalCredited = Math.round((creditedAmount + bonusAmount) * 100) / 100;
 
-    user.balance = Math.max(0, user.balance + totalCredited);
-    await user.save();
+    // S-K4 (MP-0.10): atomik $inc — paralel yukleme/siparis dusumleriyle
+    // lost-update onlenir (5 paralel yuklemede para kayboluyordu).
+    const updatedUser = await UserModel.findOneAndUpdate(
+      { _id: user._id },
+      { $inc: { balance: totalCredited } },
+      { new: true },
+    );
 
     await BalanceTopUpModel.create({
       userId: user._id.toString(),
@@ -1593,7 +1644,7 @@ router.post("/users/:id/balance", attachAuth, restrictTo("staff", "manager"), as
       timestamp: new Date(),
     });
 
-    return res.json({ user: serializeUser(user) });
+    return res.json({ user: serializeUser(updatedUser ?? user) });
   } catch (error) {
     console.error("POST /users/:id/balance error:", error);
     return next(new ApiError(500, "BALANCE_TOPUP_FAILED", "sys:bakiye-yuklenirken-hata-olustu"));
@@ -1799,15 +1850,23 @@ router.get("/products", async (_req, res) => {
 
 router.post("/products", attachAuth, restrictTo("manager"), async (req, res, next) => {
   try {
-    const name = String(req.body.name || "").trim();
+    const name = sanitizePlainText(String(req.body.name || "").trim());
     const price = ensureNumber(req.body.price);
-    const category = String(req.body.category || "").trim();
-    const description = String(req.body.description || "").trim();
+    const category = String(req.body.category || "").trim().slice(0, 100);
+    const description = sanitizePlainText(String(req.body.description || "").trim());
     const inStock = req.body.inStock !== undefined ? Boolean(req.body.inStock) : true;
     const ingredients = Array.isArray(req.body.ingredients) ? req.body.ingredients.map(String) : [];
 
     if (!name) {
       return res.status(400).json({ message: await getSystemText("urun-ismi-zorunludur") });
+    }
+    // S-D2 (MP-0.10): ürün adı/açıklaması sınırla REDDEDİLİR (kesilmez) —
+    // 5000 karakterlik adlar katalog listelerine taşınıyordu.
+    if (name.length > 200) {
+      return res.status(400).json({ message: "Ürün adı en fazla 200 karakter olabilir." });
+    }
+    if (description.length > 2000) {
+      return res.status(400).json({ message: "Ürün açıklaması en fazla 2000 karakter olabilir." });
     }
     if (price < 0) {
       return res.status(400).json({ message: await getSystemText("fiyat-sifirdan-kucuk-olamaz") });
@@ -1844,6 +1903,9 @@ router.patch("/products/:id", attachAuth, restrictTo("staff", "manager"), async 
       }
 
       current.inStock = Boolean(updates.inStock);
+      // S-O4a: manuel karar otomatik kapatma işaretini kaldırır — envanter
+      // senkronu bundan sonra bu ürünü kendi başına yeniden açamaz.
+      current.inStockAutoClosed = false;
       await current.save();
       return res.json(serializeSimpleDocument(current));
     }
@@ -1856,15 +1918,21 @@ router.patch("/products/:id", attachAuth, restrictTo("staff", "manager"), async 
 
     const previousImage = product.image;
 
-    const name = updates.name !== undefined ? String(updates.name || "").trim() : undefined;
+    const name = updates.name !== undefined ? sanitizePlainText(String(updates.name || "").trim()) : undefined;
     const price = updates.price !== undefined ? ensureNumber(updates.price) : undefined;
-    const category = updates.category !== undefined ? String(updates.category || "").trim() : undefined;
-    const description = updates.description !== undefined ? String(updates.description || "").trim() : undefined;
+    const category = updates.category !== undefined ? String(updates.category || "").trim().slice(0, 100) : undefined;
+    const description = updates.description !== undefined ? sanitizePlainText(String(updates.description || "").trim()) : undefined;
     const inStock = updates.inStock !== undefined ? Boolean(updates.inStock) : undefined;
     const ingredients = Array.isArray(updates.ingredients) ? updates.ingredients.map(String) : undefined;
 
     if (name !== undefined && !name) {
       return res.status(400).json({ message: await getSystemText("urun-ismi-bos-olamaz") });
+    }
+    if (name !== undefined && name.length > 200) {
+      return res.status(400).json({ message: "Ürün adı en fazla 200 karakter olabilir." });
+    }
+    if (description !== undefined && description.length > 2000) {
+      return res.status(400).json({ message: "Ürün açıklaması en fazla 2000 karakter olabilir." });
     }
     if (price !== undefined && price < 0) {
       return res.status(400).json({ message: await getSystemText("fiyat-sifirdan-kucuk-olamaz") });
@@ -1877,7 +1945,11 @@ router.patch("/products/:id", attachAuth, restrictTo("staff", "manager"), async 
     if (price !== undefined) product.price = price;
     if (category !== undefined) product.category = category;
     if (description !== undefined) product.description = description;
-    if (inStock !== undefined) product.inStock = inStock;
+    if (inStock !== undefined) {
+      product.inStock = inStock;
+      // S-O4a: manuel karar otomatik kapatma işaretini kaldırır.
+      product.inStockAutoClosed = false;
+    }
     if (ingredients !== undefined) product.ingredients = ingredients;
 
     if ("image" in updates) {
@@ -2462,6 +2534,31 @@ router.post("/orders", attachAuth, async (req, res) => {
     }),
   );
 
+  // S-O5 (MP-0.10): sipariş anında malzeme yeterliliği kontrol edilir —
+  // stok düşümü tamamlamada (decrementInventoryForOrder) yapılır ama
+  // kontrol yoksa 3L süt ile 6 Latte gibi oversell kabul edilirdi.
+  // Tam rezervasyon yerine kabul kontrolü: yetersizse sipariş reddedilir.
+  // (Product.ingredients malzeme ADLARINI taşır; CONSUMPTION_PER_UNIT=1.)
+  const ingredientDemand = new Map<string, number>();
+  for (const item of normalizedItems) {
+    for (const ingredientName of item.product.ingredients || []) {
+      const key = String(ingredientName).trim();
+      if (!key) continue;
+      ingredientDemand.set(key, (ingredientDemand.get(key) || 0) + item.quantity);
+    }
+  }
+  if (ingredientDemand.size > 0) {
+    const stockItems = await InventoryItemModel.find({ name: { $in: Array.from(ingredientDemand.keys()) } });
+    for (const stockItem of stockItems) {
+      const demand = ingredientDemand.get(stockItem.name) || 0;
+      if (demand > 0 && stockItem.currentStock < demand) {
+        return res.status(400).json({
+          message: `${stockItem.name} stoku yetersiz (kalan: ${stockItem.currentStock}, gerekli: ${demand}). Lütfen miktarı azaltın.`,
+        });
+      }
+    }
+  }
+
   const subtotal = normalizedItems.reduce((sum, item) => sum + item.product.price * item.quantity, 0);
   // Damga (stamp) bedava urun haklari once harcanir; puan kampanyasi
   // indirimi kalan tutara, kupon en sonda uygulanir — indirimler ayni
@@ -2543,6 +2640,15 @@ router.post("/orders", attachAuth, async (req, res) => {
     // katılımcının masadaki mevcut borcu + bu yeni sipariş bakiyesini
     // aşmamalı (negatif bakiyeye izin verilmez). Personel/yönetici siparişinde
     // borç hedef katılımcıya yazılır, kontrol o kullanıcı üzerinden yapılır.
+    // S-K6 (MP-0.10): kontrol artık atomiktir — katılımcının paidAmount'ı
+    // koşullu $inc ile aynı sorguda arttırılır; iki eşzamanlı sipariş aynı
+    // bakiyeyi iki kez "göremez".
+    const debtorEarly = await UserModel.findById(orderUserId);
+    if (debtorEarly && (debtorEarly.unpaidTableDebt || 0) > 0) {
+      return res.status(403).json({
+        message: `Ödenmemiş masa borcunuz var (₺${debtorEarly.unpaidTableDebt.toFixed(2)}). Önce önceki masa hesabınızı kapatmalısınız.`,
+      });
+    }
     const existingOrders = await OrderModel.find({
       tableSessionToken,
       userId: orderUserId,
@@ -2556,8 +2662,7 @@ router.post("/orders", attachAuth, async (req, res) => {
       Number((existingOrders.reduce((sum, o) => sum + o.total, 0) - paidSoFar).toFixed(2)),
     );
 
-    const debtor = await UserModel.findById(orderUserId);
-    const debtorBalance = debtor ? Number(debtor.balance || 0) : 0;
+    const debtorBalance = debtorEarly ? Number(debtorEarly.balance || 0) : 0;
 
     if (Number((existingDebt + total).toFixed(2)) > debtorBalance) {
       return res.status(400).json({ message: await getSystemText("masa-siparis-bakiyesi-yetersiz") });
@@ -2577,6 +2682,11 @@ router.post("/orders", attachAuth, async (req, res) => {
     req.authUser = updatedUser;
   }
 
+  // S-O8 (MP-0.10): sipariş notu sınırlı ve string'e sabitlenir — daha önce
+  // 1MB gövde DB'ye yazılıp tüm istemcilere taşınıyordu (chat 1000, garson
+  // çağrısı 300 sınırliyken note sınırsızdı).
+  const orderNote = String(req.body.note || "").slice(0, 500);
+
   const order = await OrderModel.create({
     userId: orderUserId,
     userName: orderUserName,
@@ -2586,7 +2696,7 @@ router.post("/orders", attachAuth, async (req, res) => {
     total,
     status: "pending",
     timestamp: new Date(),
-    note: String(req.body.note || ""),
+    note: orderNote,
     cancelReason: "",
     appliedCampaign,
     appliedCoupon,
@@ -2669,6 +2779,33 @@ router.patch("/orders/:id/status", attachAuth, restrictTo("staff", "manager"), a
         { _id: order.userId },
         { $inc: { balance: refundTotal } },
       );
+    } else {
+      // S-K2 (MP-0.10): masa siparişi ÖDENMİŞSE red iadesi yapılmalı.
+      // /table-sessions/pay bakiyeyi düşmüştür; red, hesaptan bu siparişi
+      // çıkarır (status != rejected filtresi) — ödenen tutar yeni hesabı
+      // aşıyorsa fark müşteriye iade edilir, yoksa para buharlaşıyordu.
+      const paidSession = await TableSessionModel.findOne({
+        sessionToken: order.tableSessionToken,
+      });
+      if (paidSession) {
+        const paidTotal: number =
+          (paidSession.participants || []).map((p: any) => Number(p.paidAmount || 0)).reduce((s, v) => s + v, 0) +
+          (paidSession.leftParticipants || []).map((p: any) => Number(p.paidAmount || 0)).reduce((s, v) => s + v, 0);
+        const remainingOrders = await OrderModel.find({
+          tableSessionToken: order.tableSessionToken,
+          status: { $ne: "rejected" },
+          _id: { $ne: order._id },
+        });
+        const billWithoutThis = remainingOrders.reduce((s, o) => s + o.total, 0);
+        const overpaid = Number((paidTotal - billWithoutThis).toFixed(2));
+        if (overpaid > 0) {
+          const refundTotal = Math.min(overpaid, Number(order.total.toFixed(2)));
+          await UserModel.updateOne(
+            { _id: order.userId },
+            { $inc: { balance: refundTotal } },
+          );
+        }
+      }
     }
 
     // Kupon iadesi: siparis reddedildiyse kullanici hakki geri alir;
@@ -3066,6 +3203,7 @@ router.post("/tables/:tableNumber/force-close", attachAuth, restrictTo("manager"
       await TableSessionModel.findByIdAndUpdate(table.currentSessionId, {
         status: "closed",
         closedAt: new Date(),
+        closeReason: "Yönetici tarafından kapatıldı.",
       });
       table.currentSessionId = "";
       await table.save();
@@ -3075,6 +3213,32 @@ router.post("/tables/:tableNumber/force-close", attachAuth, restrictTo("manager"
   } catch (error) {
     console.error("force close table error:", error);
     return next(new ApiError(500, "TABLE_FORCE_CLOSE_FAILED", "sys:masa-oturumu-sonlandirilamadi"));
+  }
+});
+
+// S-K3 (MP-0.10): no-pay ile ayrılmış kullanıcının masa borcu kasada
+// tahsil edildiğinde bayrağı temizler. Oturum kapandıysa müşterinin
+// kendisi bu borcu uygulama içinden ödeyemez — tahsilat kaydı kasadadır.
+router.post("/users/:id/table-debt/settle", attachAuth, restrictTo("manager"), async (req, res, next) => {
+  try {
+    const user = await UserModel.findById(req.params.id);
+    if (!user) {
+      return res.status(404).json({ message: await getSystemText("kullanici-bulunamadi") });
+    }
+    if ((user.unpaidTableDebt || 0) <= 0) {
+      return res.json({ success: true, unpaidTableDebt: 0, changed: false });
+    }
+
+    const settled = Math.min(
+      Number(user.unpaidTableDebt.toFixed(2)),
+      Math.max(0, Number(ensureNumber(req.body.amount) || user.unpaidTableDebt)),
+    );
+
+    await UserModel.updateOne({ _id: user._id }, { $inc: { unpaidTableDebt: -settled } });
+    return res.json({ success: true, settled, changed: true });
+  } catch (error) {
+    console.error("settle table debt error:", error);
+    return next(new ApiError(500, "TABLE_DEBT_SETTLE_FAILED", "sys:islem-sirasinda-bir-hata-olustu"));
   }
 });
 
@@ -3098,6 +3262,8 @@ router.post("/table-sessions/join-or-create", attachAuth, async (req, res, next)
     if (!tableNumber) {
       return res.status(400).json({ message: await getSystemText("masa-numarasi-gerekli") });
     }
+    const currentUserId = req.authUser._id.toString();
+    const currentUserName = `${req.authUser.name} ${req.authUser.surname}`.trim();
 
     const table = await TableModel.findOne({ tableNumber });
     if (!table) {
@@ -3110,8 +3276,21 @@ router.post("/table-sessions/join-or-create", attachAuth, async (req, res, next)
       status: "open",
     });
 
-    const currentUserId = req.authUser._id.toString();
-    const currentUserName = `${req.authUser.name} ${req.authUser.surname}`.trim();
+    // S-K3 (MP-0.10): kapanmamış masa borcu olan kullanıcı yeni oturuma
+    // katılamaz — no-pay ile sıfır ödeyip ürün alma döngüsü kapanır.
+    // İstisna: borcunun oluştuğu açık oturuma dönüşü (borcunu ödemesi için)
+    // serbesttir — katılımcı veya ayrılmış katılımcı ise blok uygulanmaz.
+    if ((req.authUser.unpaidTableDebt || 0) > 0) {
+      const returningToDebtSession = session && (
+        (session.participants || []).some((p: any) => p.userId === currentUserId) ||
+        (session.leftParticipants || []).some((p: any) => p.userId === currentUserId)
+      );
+      if (!returningToDebtSession) {
+        return res.status(403).json({
+          message: `Ödenmemiş masa borcunuz var (₺${req.authUser.unpaidTableDebt.toFixed(2)}). Önce önceki masa hesabınızı kapatmalısınız.`,
+        });
+      }
+    }
 
     if (!session) {
       // Aktif oturum yok, yeni oluştur ve host yap
@@ -3548,7 +3727,7 @@ router.post("/table-sessions/pay", attachAuth, async (req, res, next) => {
       return res.status(400).json({ message: await getSystemText("gecersiz-parametreler") });
     }
 
-    const session = await TableSessionModel.findOne({ sessionToken, status: "open" });
+    let session = await TableSessionModel.findOne({ sessionToken, status: "open" });
     if (!session) {
       return res.status(404).json({ message: await getSystemText("aktif-masa-oturumu-bulunamadi") });
     }
@@ -3630,25 +3809,55 @@ router.post("/table-sessions/pay", attachAuth, async (req, res, next) => {
     }
 
     const roundedPayment = Number(paymentAmount.toFixed(2));
+
+    // S-K6 (MP-0.10): oturum üzerinde atomik ödeme claim'i — katılımcının
+    // güncel paidAmount'ı sorgu koşulunda doğrulanır ve tek $inc ile
+    // arttırılır. Eşzamanlı ikinci pay/leave aynı koşulu kaçırdığından
+    // (paidAmount arada değişti) çift kesim yapılamaz.
+    const currentPaid = session.participants.find((p) => p.userId === currentUserId)?.paidAmount ?? 0;
+    const claimedSession = await TableSessionModel.findOneAndUpdate(
+      {
+        _id: session._id,
+        status: "open",
+        participants: { $elemMatch: { userId: currentUserId, paidAmount: currentPaid } },
+      },
+      {
+        $inc: { "participants.$.paidAmount": roundedPayment },
+        $set: { "participants.$.hasPaid": true, "participants.$.paidAt": new Date() },
+      },
+      { new: true },
+    );
+    if (!claimedSession) {
+      return res.status(409).json({ message: await getSystemText("bakiye-yetersiz-veya-islem-sirasinda-bir-cakisma-olustu-lutfen-tekrar-deneyin") });
+    }
+
     const updatedUser = await UserModel.findOneAndUpdate(
       { _id: currentUserId, balance: { $gte: roundedPayment } },
       { $inc: { balance: -roundedPayment } },
       { new: true }
     );
     if (!updatedUser) {
+      // Bakiye yetmedi — oturumdaki claim'i geri al, para düşülmedi.
+      await TableSessionModel.updateOne(
+        { _id: session._id, "participants.userId": currentUserId },
+        { $inc: { "participants.$.paidAmount": -roundedPayment } },
+      );
       return res.status(400).json({ message: await getSystemText("bakiye-yetersiz-veya-islem-sirasinda-bir-cakisma-olustu-lutfen-tekrar-deneyin") });
     }
     req.authUser = updatedUser;
 
-    // Oturumda kullanıcının ödemesini güncelle
-    const participantIndex = session.participants.findIndex((p) => p.userId === currentUserId);
-    if (participantIndex !== -1) {
-      const p = session.participants[participantIndex];
-      p.paidAmount = Number((p.paidAmount + roundedPayment).toFixed(2));
-      p.hasPaid = true;
-      p.paidAt = new Date();
+    // Oturum referansını claim edilmiş belgeyle senkronla — kapanış
+    // hesapları (nextTotalPaid) atomik belge üzerinden yapılır.
+    session = claimedSession;
+
+    // S-K3 (MP-0.10): ödeme sonrası kullanıcının bu oturumdaki borcu
+    // tamamen kapandıysa borçlu bayrağı temizlenir.
+    const myOrdersAfterPay = orders.filter((o) => o.userId === currentUserId);
+    const myUnpaidAfterPay = myOrdersAfterPay.reduce((s, o) => s + o.total, 0) -
+      (session.participants.find((p) => p.userId === currentUserId)?.paidAmount || 0);
+    if (myUnpaidAfterPay <= 0.001) {
+      await UserModel.updateOne({ _id: currentUserId }, { $set: { unpaidTableDebt: 0 } });
     }
-    await session.save();
 
     // Log veya balance top up kaydı oluştur
     await BalanceTopUpModel.create({
@@ -3661,7 +3870,8 @@ router.post("/table-sessions/pay", attachAuth, async (req, res, next) => {
       timestamp: new Date(),
     });
 
-    // Masadaki toplam ödenen tutarı tekrar hesapla
+    // Masadaki toplam ödenen tutarı tekrar hesapla (atomik claim edilmiş
+    // belge üzerinden — S-K6).
     const nextTotalPaid = 
       session.participants.map((p) => p.paidAmount).reduce((sum, amt) => sum + amt, 0) +
       (session.leftParticipants || []).map((p) => p.paidAmount).reduce((sum, amt) => sum + amt, 0);
@@ -3669,12 +3879,18 @@ router.post("/table-sessions/pay", attachAuth, async (req, res, next) => {
 
     // Eğer tüm borç ödendiyse oturumu kapat
     if (nextRemaining <= 0 || paymentType === "all") { // tolerans veya all
-      session.status = "closed";
-      session.closedAt = new Date();
-      session.closedBy = currentUserId;
-      session.closedByRole = req.authUser.role;
-      session.closeReason = "Hesap tamamen ödendi.";
-      await session.save();
+      await TableSessionModel.updateOne(
+        { _id: session._id },
+        {
+          $set: {
+            status: "closed",
+            closedAt: new Date(),
+            closedBy: currentUserId,
+            closedByRole: req.authUser.role,
+            closeReason: "Hesap tamamen ödendi.",
+          },
+        },
+      );
 
       await TableModel.updateOne({ tableNumber: session.tableNumber }, { $set: { currentSessionId: "" } });
     }
@@ -3755,12 +3971,35 @@ router.post("/table-sessions/leave", attachAuth, async (req, res, next) => {
 
       if (paymentAmount > 0) {
         const roundedPayment = Number(paymentAmount.toFixed(2));
+
+        // S-K6 (MP-0.10): pay yoluyla aynı atomik claim — leave ile eşzamanlı
+        // gelen pay çift kesim yapamaz.
+        const claimBeforePay = participant.paidAmount;
+        const claimOk = await TableSessionModel.findOneAndUpdate(
+          {
+            _id: session._id,
+            status: "open",
+            participants: { $elemMatch: { userId: currentUserId, paidAmount: claimBeforePay } },
+          },
+          {
+            $inc: { "participants.$.paidAmount": roundedPayment },
+            $set: { "participants.$.hasPaid": true, "participants.$.paidAt": new Date() },
+          },
+        );
+        if (!claimOk) {
+          return res.status(409).json({ message: await getSystemText("bakiye-yetersiz-veya-islem-sirasinda-bir-cakisma-olustu-lutfen-tekrar-deneyin") });
+        }
+
         const updatedUser = await UserModel.findOneAndUpdate(
           { _id: currentUserId, balance: { $gte: roundedPayment } },
           { $inc: { balance: -roundedPayment } },
           { new: true }
         );
         if (!updatedUser) {
+          await TableSessionModel.updateOne(
+            { _id: session._id, "participants.userId": currentUserId },
+            { $inc: { "participants.$.paidAmount": -roundedPayment } },
+          );
           return res.status(400).json({ message: await getSystemText("bakiye-yetersiz-veya-islem-sirasinda-bir-cakisma-olustu-lutfen-tekrar-deneyin") });
         }
         req.authUser = updatedUser;
@@ -3776,8 +4015,8 @@ router.post("/table-sessions/leave", attachAuth, async (req, res, next) => {
           timestamp: new Date(),
         });
 
-        // Ödenen miktarı güncelle
-        participant.paidAmount = Number((participant.paidAmount + roundedPayment).toFixed(2));
+        // Yerel referansı atomik belgeyle hizala
+        participant.paidAmount = Number((claimBeforePay + roundedPayment).toFixed(2));
         participant.hasPaid = true;
         participant.paidAt = new Date();
       }
@@ -3790,6 +4029,9 @@ router.post("/table-sessions/leave", attachAuth, async (req, res, next) => {
         leftAt: new Date(),
         totalUnpaid: 0,
       });
+
+      // S-K3 (MP-0.10): ödeyerek ayrıldı — borçlu bayrağı temizlenir.
+      await UserModel.updateOne({ _id: currentUserId }, { $set: { unpaidTableDebt: 0 } });
     } else {
       // Ödemeden ayrılma (no-pay)
       // leftParticipants'a ekle (Borç masada kaldı)
@@ -3800,6 +4042,15 @@ router.post("/table-sessions/leave", attachAuth, async (req, res, next) => {
         leftAt: new Date(),
         totalUnpaid: userUnpaid,
       });
+
+      // S-K3 (MP-0.10): borç kaydı kullanıcıya da yazılır — yeni masa
+      // oturumuna katılım ve masa siparişi borç kapanana kadar bloklanır.
+      if (userUnpaid > 0) {
+        await UserModel.updateOne(
+          { _id: currentUserId },
+          { $set: { unpaidTableDebt: Number(userUnpaid.toFixed(2)) } },
+        );
+      }
     }
 
     // Katılımcılardan çıkar
@@ -3823,7 +4074,18 @@ router.post("/table-sessions/leave", attachAuth, async (req, res, next) => {
       session.closedBy = currentUserId;
       session.closedByRole = req.authUser.role;
       session.closeReason = "Tüm katılımcılar ayrıldı ve borç kalmadı.";
-      
+
+      await TableModel.updateOne({ tableNumber: session.tableNumber }, { $set: { currentSessionId: "" } });
+    } else if (session.participants.length === 0 && remainingBill > 0) {
+      // S-O4b (MP-0.10): masada kimse kalmadıysa ve borç varsa oturum
+      // asılı kalmasın — "tahsil edilemedi" ile kapatılır; borçlu bayrak
+      // katılımcılarda yaşamaya devam eder (yeni masa kuramazlar).
+      session.status = "closed";
+      session.closedAt = new Date();
+      session.closedBy = currentUserId;
+      session.closedByRole = req.authUser.role;
+      session.closeReason = "Masada katılımcı kalmadı; borç tahsil edilemedi.";
+
       await TableModel.updateOne({ tableNumber: session.tableNumber }, { $set: { currentSessionId: "" } });
     }
 

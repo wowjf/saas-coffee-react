@@ -51,7 +51,16 @@ export async function attachAuth(req: AuthRequest, res: Response, next: NextFunc
     }) as {
       userId: string;
       tokenVersion?: number;
+      purpose?: string;
     };
+
+    // S-K1 (MP-0.10): oturum token'ı "purpose" claim'i taşımaz. Taşıyan
+    // token (ör. sadakat QR'ı) ayrık bir amaç için üretilmiştir ve oturum
+    // olarak KULLANILAMAZ — QR'ı gören biri hesabı devralmasın.
+    if (decoded.purpose) {
+      return res.status(401).json({ message: await getSystemText("gecersiz-veya-suresi-dolmus-oturum") });
+    }
+
     const user = await UserModel.findById(decoded.userId);
 
     if (!user) {
@@ -87,7 +96,17 @@ export async function attachOptionalAuth(req: AuthRequest, _res: Response, next:
     }) as {
       userId: string;
       tokenVersion?: number;
+      purpose?: string;
     };
+
+    // S-K1 (MP-0.10): purpose taşıyan token (ör. sadakat QR'ı) opsiyonel
+    // auth'ta da sessizce yok sayılır — kimlik olarak bağlanamaz.
+    if (decoded.purpose) {
+      req.authUser = undefined;
+      req.authRole = undefined;
+      return next();
+    }
+
     const user = await UserModel.findById(decoded.userId);
 
     // MP-2.1: iptal edilmis token opsiyonel auth'ta da sessizce reddedilir.

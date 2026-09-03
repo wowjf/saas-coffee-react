@@ -164,7 +164,7 @@ export async function syncProductStockFlags(ingredientNames?: string[]): Promise
   // Bu malzemeleri içeren ürünler
   const affectedProducts = await ProductModel.find({
     ingredients: { $in: namesFilter },
-  }).select({ name: 1, ingredients: 1, inStock: 1 });
+  }).select({ name: 1, ingredients: 1, inStock: 1, inStockAutoClosed: 1 });
 
   let updatedCount = 0;
 
@@ -174,7 +174,21 @@ export async function syncProductStockFlags(ingredientNames?: string[]): Promise
     );
 
     if (hasDepletedIngredient && product.inStock) {
-      await ProductModel.updateOne({ _id: product._id }, { $set: { inStock: false } });
+      // S-O4a: otomatik kapatma işaretlenir — malzeme geri geldiğinde
+      // senkron yeniden açabilir.
+      await ProductModel.updateOne(
+        { _id: product._id },
+        { $set: { inStock: false, inStockAutoClosed: true } },
+      );
+      updatedCount += 1;
+    } else if (!hasDepletedIngredient && !product.inStock && (product as any).inStockAutoClosed) {
+      // S-O4a (MP-0.10): tüm malzemeleri yeniden temin edilen ve otomatik
+      // kapatılmış ürün tekrar satışa açılır. Manuel kapatılan (işaret
+      // kaldrılmış) ürünler dokunulmaz.
+      await ProductModel.updateOne(
+        { _id: product._id },
+        { $set: { inStock: true, inStockAutoClosed: false } },
+      );
       updatedCount += 1;
     }
   }

@@ -40,3 +40,16 @@ export function pickRoleLabel(role: UserRole) {
 
   return "Musteri";
 }
+
+// S-O10 (MP-0.10): kullanıcıca yazılan düz metin alanları için hafif
+// sanitize — React stringleri escape ettiği için XSS bugün ulaşılamaz,
+// ancak <script>/<iframe>/on* attribute gibi aktif içerik kalıcı olarak
+// DB'ye yazılmasın (savunma derinliği; ileride bir dangerouslySetInnerHTML
+// tek başına yeterli olurdu).
+export function sanitizePlainText(value: string): string {
+  return value
+    .replace(/<\s*(script|iframe|object|embed|svg|math|link|meta|style)\b/gi, "&lt;")
+    .replace(/\son\w+\s*=/gi, " on_neutralized=")
+    .replace(/javascript\s*:/gi, "javascript_")
+    .slice(0, 10_000);
+}

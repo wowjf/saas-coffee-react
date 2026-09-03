@@ -129,6 +129,11 @@ const UserSchema = new mongoose.Schema(
     lockUntil: { type: Date, default: null },
     leaderboardOptedIn: { type: Boolean, default: true },
     leaderboardOptedOutAt: { type: Date, default: null },
+    // S-K3 (MP-0.10): ödemeden masadan ayrılma yaptırımı. no-pay leave
+    // borcu kapatana kadar yeni masa oturumuna katılmayı/sipariş vermeyi
+    // bloklar. Eski belgelerde undefined kalır — yalnızca açık borç
+    // kaydı varsa anlam taşır.
+    unpaidTableDebt: { type: Number, default: 0, min: 0 },
     balance: {
       type: Number,
       default: 0,
