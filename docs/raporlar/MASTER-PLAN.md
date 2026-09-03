@@ -24,6 +24,11 @@
 
 ## 0. Yönetici Özeti
 
+> **Güncelleme (2026-09-03, orkestra oturumu):** MVP backend hattı tamamlandı.
+> Kalite kapısı: `tsc --noEmit` temiz, **203/203 test** (vitest, exit 0), `vite build` başarılı.
+> Bu oturumda kapanan maddeler: MP-2.1 (tokenVersion iptali — CSP enforce ve token ömrü kısmı hâlâ açık, kasıtlı), MP-2.2 (şifre politikası), MP-2.3 (Docker Mongo auth), MP-2.5 (masa sipariş sınırları + bakiye guard), MP-2.6 (review doğrulama + metin sınırları), MP-2.11 (timestamp standardı), MP-2.12 (indexler), MP-2.13 (pagination), MP-2.14 (şema validasyonları), MP-2.15 (atomik iade/kampanya), MP-3.1 (SSE `/api/events` + eventBus + nginx location). Ayrıca push dispatch'teki ateşle-unut promise'ler yakalanır yapıldı (unhandled rejection üretimde süreci öldürüyordu). Kalan açık: MP-2.4 (KVKK), MP-2.7 (bot önlemi), MP-2.8/2.9/2.10 (yapısal bölme/test genişletme), MP-3.x'in frontend kısmı — canlıya alma için engel değiller.
+
+
 Proje fonksiyonel olarak zengin ve büyük ölçüde çalışır durumda: `tsc --noEmit` temiz, **106/106 test geçiyor** (QA sayesinde), bcrypt + JWT + helmet + TLS 1.2/1.3 + atomik bakiye guard'ları gibi sağlam temeller var. Ancak **canlıya alınmayı engelleyen 9 madde** var: 4 kritik güvenlik açığı (kendi kendine para basma, e-postayla rol yükseltme, git geçmişinde TLS anahtarı, hediye/abonelik yarış koşulu), Express 4'te yakalanmayan async hatalardan kaynaklanan **sunucu çökme/askıda kalma** riski (QA'nın testle belgelediği DEF-1), tek kullanıcıda bile ~10 dakikada tetiklenen **429 rate-limit/polling çakışması** ve varsayılan yönetici şifresi.
 
 Bunun altında iki büyük yapısal tema yatıyor: (1) **iş mantığının route dosyalarına ve 3 dev panel bileşenine (~13.000 satır) gömülü olması**, (2) **5 saniyede bir tam-bootstrap polling'i** ile sunucu-verisi ile istemci-state'in aynı yerde yaşaması. Bu ikisi ayrı ayrı backend ve frontend raporlarında ele alınıyor; çözümleri (router/servis bölme, bootstrap bölme + SSE, Context split + TanStack Query) P2/P3'e planlandı.
