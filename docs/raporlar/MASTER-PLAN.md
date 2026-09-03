@@ -25,8 +25,27 @@
 ## 0. Yönetici Özeti
 
 > **Güncelleme (2026-09-03, orkestra oturumu):** MVP backend hattı tamamlandı.
-> Kalite kapısı: `tsc --noEmit` temiz, **203/203 test** (vitest, exit 0), `vite build` başarılı.
+> Kalite kapısı: `tsc --noEmit` temiz, **229/229 test** (vitest, exit 0), `vite build` başarılı.
 > Bu oturumda kapanan maddeler: MP-2.1 (tokenVersion iptali — CSP enforce ve token ömrü kısmı hâlâ açık, kasıtlı), MP-2.2 (şifre politikası), MP-2.3 (Docker Mongo auth), MP-2.5 (masa sipariş sınırları + bakiye guard), MP-2.6 (review doğrulama + metin sınırları), MP-2.11 (timestamp standardı), MP-2.12 (indexler), MP-2.13 (pagination), MP-2.14 (şema validasyonları), MP-2.15 (atomik iade/kampanya), MP-3.1 (SSE `/api/events` + eventBus + nginx location). Ayrıca push dispatch'teki ateşle-unut promise'ler yakalanır yapıldı (unhandled rejection üretimde süreci öldürüyordu). Kalan açık: MP-2.4 (KVKK), MP-2.7 (bot önlemi), MP-2.8/2.9/2.10 (yapısal bölme/test genişletme), MP-3.x'in frontend kısmı — canlıya alma için engel değiller.
+>
+> **Güncelleme (2026-09-03, ikinci oturum — MVP tamamlama):** Denetimde çıkan tüm
+> mantık boşlukları kapatıldı, test sayısı 203 → **229**:
+> - **Sadakat QR (G1-G3):** tokenVersion iptal paritesi, tam damga (stamp_card)
+>   sistemi — kazanım/eşik döngüsü/hak harcama (en ucuz birimden), 13 uçtan uca test.
+> - **A1 (SSE köprüsü):** eventBus'a üreticiler bağlandı (sipariş durumu, yeni
+>   sipariş, garson çağrısı, sohbet mesajı); istemci EventSource'a abone
+>   (`/api/events?token=`); polling yedeğe indi (müşteri 5→30 sn, manager 15→60 sn).
+> - **A2 (envanter):** sipariş tamamlamada malzeme adı eşleşmesiyle atomik stok
+>   düşümü, eşik altında personel bildirimi + bağımlı ürün `inStock=false` otomatiği.
+> - **A3 (kupon):** kuponlar sipariş akışına gerçek bağlandı — atomik kullanım,
+>   reddedilen siparişte iade, sepette kupon kodu girişi.
+> - **B temizliği:** ölü `pointsProgress`/`pointsRewardThreshold` alanları
+>   kaldırıldı (B1), api.ts'teki ölü `InventoryItemModel` import'u çıkarıldı (B3),
+>   abonelik `discountPercent`'i indirim zincirinin son halkası olarak gerçek
+>   davranışa bağlandı (B4 — freeDelivery/priorityQueue/exclusiveProducts
+>   fiziksel teslimat olmadığından bilgisel bayrak olarak kaldı).
+> - İndirim zinciri nihai sırası: damga hakkı → puan kampanyası → kupon → abonelik
+>   (her adım öncekinden kalan tutar üzerinde, hiçbir indirim aynı birime binmez).
 
 
 Proje fonksiyonel olarak zengin ve büyük ölçüde çalışır durumda: `tsc --noEmit` temiz, **106/106 test geçiyor** (QA sayesinde), bcrypt + JWT + helmet + TLS 1.2/1.3 + atomik bakiye guard'ları gibi sağlam temeller var. Ancak **canlıya alınmayı engelleyen 9 madde** var: 4 kritik güvenlik açığı (kendi kendine para basma, e-postayla rol yükseltme, git geçmişinde TLS anahtarı, hediye/abonelik yarış koşulu), Express 4'te yakalanmayan async hatalardan kaynaklanan **sunucu çökme/askıda kalma** riski (QA'nın testle belgelediği DEF-1), tek kullanıcıda bile ~10 dakikada tetiklenen **429 rate-limit/polling çakışması** ve varsayılan yönetici şifresi.
