@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { useApp } from '../AppContext';
 import { SupportChat } from './SupportChat';
 import { ReservationPanel } from './ReservationPanel';
+import { FriendsGiftsPanel } from './FriendsGiftsPanel';
 import { Address, Campaign, LoyaltyQrPayload, PaymentMethod } from '../types';
 import { 
   Wallet, 
@@ -224,6 +225,7 @@ const DynamicIslandHeader: React.FC<{
         policies: 'Politikalar',
         about: 'Hakkımızda',
         'orders-history': 'Geçmiş Siparişler',
+        'friends-gifts': 'Arkadaşlar & Hediyeler',
         'topups-history': 'Bakiye Geçmişi',
       };
       label = subLabels[profileView] || 'Profil';
@@ -370,7 +372,7 @@ export const CustomerPanel: React.FC<{ activeTab: string }> = ({ activeTab }) =>
   const [ordersView, setOrdersView] = useState<'hub' | 'list'>('hub');
   const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
   const [selectedNotificationId, setSelectedNotificationId] = useState<string | null>(null);
-  const [profileView, setProfileView] = useState<'main' | 'addresses' | 'payments' | 'favorites' | 'settings' | 'profile-info' | 'change-password' | 'about' | 'policies' | 'orders-history' | 'topups-history'>('main');
+  const [profileView, setProfileView] = useState<'main' | 'addresses' | 'payments' | 'favorites' | 'settings' | 'profile-info' | 'change-password' | 'about' | 'policies' | 'orders-history' | 'topups-history' | 'friends-gifts'>('main');
   const [menuView, setMenuView] = useState<'categories' | 'products'>('categories');
   const [searchQuery, setSearchQuery] = useState('');
   const [showInStockOnly, setShowInStockOnly] = useState(false);
@@ -2164,6 +2166,7 @@ export const CustomerPanel: React.FC<{ activeTab: string }> = ({ activeTab }) =>
 
     const sidebarMenuItems = [
       { id: 'profile-info', label: 'Ayarlar & Profil Bilgileri', icon: Settings },
+      { id: 'friends-gifts', label: 'Arkadaşlar & Hediyeler', icon: Users },
       { id: 'change-password', label: t("sifre-degistir"), icon: Shield },
       { id: 'addresses', label: 'Adreslerim', icon: MapPin },
       { id: 'payments', label: t("odeme-yontemleri"), icon: CreditCard },
@@ -2175,7 +2178,17 @@ export const CustomerPanel: React.FC<{ activeTab: string }> = ({ activeTab }) =>
     ];
 
     let rightPanelContent = null;
-    if (effectiveProfileView === 'profile-info') {
+    if (effectiveProfileView === 'friends-gifts') {
+      rightPanelContent = (
+        <div className="bg-white border border-border rounded-[32px] p-6 sm:p-8 shadow-sm space-y-6">
+          <div className="border-b border-border pb-4">
+            <h2 className="text-xl font-display font-bold text-black">Arkadaşlar & Hediyeler</h2>
+            <p className="text-xs text-text-secondary mt-1">Arkadaş ekleyin, bakiye hediyesi gönderin ve alın.</p>
+          </div>
+          <FriendsGiftsPanel />
+        </div>
+      );
+    } else if (effectiveProfileView === 'profile-info') {
       rightPanelContent = (
         <div className="bg-white border border-border rounded-[32px] p-8 shadow-sm space-y-6">
           <div className="border-b border-border pb-4 flex items-center justify-between">
@@ -3238,6 +3251,7 @@ export const CustomerPanel: React.FC<{ activeTab: string }> = ({ activeTab }) =>
             })()}
 
             {[
+              { label: 'Arkadaşlar & Hediyeler', icon: Users, onClick: () => setProfileView('friends-gifts') },
               { label: 'Ayarlar', icon: Settings, onClick: () => setProfileView('settings') },
               { label: t("gecmis-siparislerim"), icon: ShoppingBag, onClick: () => setProfileView('orders-history') },
               { label: 'Bakiye Yükleme Geçmişi', icon: Wallet, onClick: () => setProfileView('topups-history') },
@@ -3987,6 +4001,18 @@ export const CustomerPanel: React.FC<{ activeTab: string }> = ({ activeTab }) =>
               </div>
             ))}
           </div>
+        </div>
+      );
+    } else if (profileView === 'friends-gifts') {
+      mobileViewContent = (
+        <div className="p-6 pb-32 space-y-6">
+          <div className="flex items-center gap-4">
+            <button onClick={() => setProfileView('main')} className="w-10 h-10 rounded-full bg-surface border border-border flex items-center justify-center">
+              <ArrowLeft size={20} />
+            </button>
+            <h1 className="text-xl font-display font-bold">Arkadaşlar & Hediyeler</h1>
+          </div>
+          <FriendsGiftsPanel />
         </div>
       );
     } else if (profileView === 'about') {

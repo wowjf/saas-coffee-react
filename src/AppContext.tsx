@@ -28,6 +28,8 @@ interface AppContextType {
   notifications: Notification[];
   markNotificationRead: (id: string) => Promise<void>;
   deleteNotification: (id: string) => Promise<void>;
+  // C6: mutasyon sonrası anında senkron (hediye bakiyesi vb. dış bileşenler için)
+  syncAfterMutation: () => Promise<void>;
   clearNotifications: () => Promise<void>;
   updateUser: (updates: Partial<User>) => Promise<void>;
   balance: number;
@@ -858,6 +860,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       notifications,
       markNotificationRead,
       deleteNotification,
+      syncAfterMutation,
       clearNotifications,
       updateUser,
       balance: user?.balance || 0,
@@ -974,6 +977,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       payTableBill,
       leaveTableSession,
       refreshTableSession,
+      syncAfterMutation,
     ],
   );
 
