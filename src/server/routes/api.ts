@@ -28,7 +28,8 @@ import SubscriptionModel, { SubscriptionPlanModel } from "../models/Subscription
 import ChatRoomModel from "../models/ChatRoom";
 import ReservationModel from "../models/Reservation";
 import WaiterCallModel from "../models/WaiterCall";
-import InventoryItemModel from "../models/InventoryItem";
+// A2: sipariş tamamlamada envanter stok düşümü.
+import { decrementInventoryForOrder, syncProductStockFlags } from "../services/inventory.js";
 import PushSubscriptionModel from "../models/PushSubscription.js";
 import { getVapidKeys } from "../config/vapid.js";
 import {
@@ -2672,6 +2673,19 @@ router.patch("/orders/:id/status", attachAuth, restrictTo("staff", "manager"), a
 
   if (req.body.status === "completed" && (previousStatus as string) !== "completed") {
     await applyCompletedOrderLoyalty(order);
+
+    // A2: envanter stok düşümü — malzeme adı eşleşmesiyle atomik $inc.
+    // Hata durumunda sipariş tamamlama başarısız olmamalı (best-effort);
+    // düşüm idempotentliği status guard'ı (yukarıdaki atomik geçiş) ile
+    // sağlanır — bu blok yalnızca tek seferlik geçişte çalışır.
+    try {
+      const stockResult = await decrementInventoryForOrder(order);
+      if (stockResult.lowStockItems.length > 0) {
+        await syncProductStockFlags(stockResult.lowStockItems.map((item) => item.name));
+      }
+    } catch (error) {
+      console.error("Inventory decrement failed:", error);
+    }
   }
 
   res.json(serializeOrder(order));

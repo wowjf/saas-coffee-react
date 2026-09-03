@@ -500,3 +500,156 @@ describe("POST /api/push/unsubscribe (MP-1.3)", () => {
     expect(remaining).toBe(0);
   });
 });
+
+// ============================================
+// A2: ENVANTER-SİPARİŞ ENTEGRASYONU
+// ============================================
+
+describe("Sipariş tamamlamada envanter stok düşümü (A2)", () => {
+  async function createManagerToken() {
+    const manager = await UserModel.create({
+      name: "Env",
+      surname: "Yonetici",
+      username: "env_yonetici",
+      email: "env-manager@test.com",
+      password: "guclu-sifre-123",
+      role: "manager",
+      sessionRole: "manager",
+    });
+    const login = await request(app).post("/api/auth/login").send({
+      email: manager.email,
+      password: "guclu-sifre-123",
+    });
+    await request(app)
+      .post("/api/auth/session-role")
+      .set("Authorization", `Bearer ${login.body.token}`)
+      .send({ role: "manager" });
+    return login.body.token as string;
+  }
+
+  async function setupOrderFixture() {
+    const InventoryItemModel = (await import("../models/InventoryItem")).default;
+    const ProductModel = (await import("../models/Product")).default;
+
+    const kahve = await InventoryItemModel.create({
+      name: "Espresso Çekirdeği",
+      unit: "kg",
+      currentStock: 10,
+      minStock: 2,
+      reorderPoint: 3,
+    });
+    const sut = await InventoryItemModel.create({
+      name: "Süt",
+      unit: "liter",
+      currentStock: 2,
+      minStock: 1,
+      reorderPoint: 1,
+    });
+
+    const latte = await ProductModel.create({
+      name: "Test Latte",
+      description: "A2 test",
+      price: 30,
+      category: "Sıcak İçecekler",
+      image: "",
+      ingredients: ["Espresso Çekirdeği", "Süt"],
+      inStock: true,
+    });
+
+    const customer = await request(app).post("/api/auth/register").send({
+      name: "Env",
+      surname: "Musteri",
+      username: "env_musteri",
+      gender: "female",
+      email: "env-musteri@test.com",
+      password: "gizli123",
+      phone: "05059998877",
+      birthDate: "1995-05-10",
+    });
+    await UserModel.updateOne(
+      { _id: customer.body.user.id },
+      { $set: { balance: 100 } },
+    );
+
+    const orderRes = await request(app)
+      .post("/api/orders")
+      .set("Authorization", `Bearer ${customer.body.token}`)
+      .send({ items: [{ productId: latte._id.toString(), quantity: 2 }] });
+
+    return { kahve, sut, latte, orderRes, customer };
+  }
+
+  it("tamamlanan sipariş malzeme stoklarını miktarla düşürür", async () => {
+    const { kahve, sut, orderRes } = await setupOrderFixture();
+    const managerToken = await createManagerToken();
+
+    // pending → preparing → ready → completed
+    for (const status of ["preparing", "ready", "completed"]) {
+      const response = await request(app)
+        .patch(`/api/orders/${orderRes.body.order.id}/status`)
+        .set("Authorization", `Bearer ${managerToken}`)
+        .send({ status });
+      expect(response.status).toBe(200);
+    }
+
+    const InventoryItemModel = (await import("../models/InventoryItem")).default;
+    const kahveAfter = await InventoryItemModel.findById(kahve._id);
+    const sutAfter = await InventoryItemModel.findById(sut._id);
+
+    // 2 adet latte = 2 birim çekirdek + 2 birim süt
+    expect(kahveAfter!.currentStock).toBe(8);
+    expect(sutAfter!.currentStock).toBe(0);
+  });
+
+  it("eşik altına inen malzeme personel bildirimi üretir ve ürünü satıştan çeker", async () => {
+    const { sut, latte, orderRes } = await setupOrderFixture();
+    const managerToken = await createManagerToken();
+
+    for (const status of ["preparing", "ready", "completed"]) {
+      await request(app)
+        .patch(`/api/orders/${orderRes.body.order.id}/status`)
+        .set("Authorization", `Bearer ${managerToken}`)
+        .send({ status });
+    }
+
+    // Süt 2→0 düştü (reorderPoint 1) → low stock bildirimi + ürün satış dışı
+    const NotificationModel = (await import("../models/Notification")).default;
+    const ProductModel = (await import("../models/Product")).default;
+
+    const warning = await NotificationModel.findOne({
+      title: "Stok Uyarısı",
+      message: /Süt/,
+    });
+    expect(warning).toBeTruthy();
+    expect(warning!.targetRole).toBe("staff");
+
+    const latteAfter = await ProductModel.findById(latte._id);
+    expect(latteAfter!.inStock).toBe(false);
+  });
+
+  it("stok yeterli değilse sipariş tamamlama yine başarılı olur (best-effort)", async () => {
+    const { orderRes } = await setupOrderFixture();
+    const managerToken = await createManagerToken();
+
+    // Stokları sıfıra çek — düşüm yine de tamamlamayı bozmamalı
+    const InventoryItemModel = (await import("../models/InventoryItem")).default;
+    await InventoryItemModel.updateMany({}, { $set: { currentStock: 0 } });
+
+    const response = await request(app)
+      .patch(`/api/orders/${orderRes.body.order.id}/status`)
+      .set("Authorization", `Bearer ${managerToken}`)
+      .send({ status: "preparing" });
+    const readyResponse = await request(app)
+      .patch(`/api/orders/${orderRes.body.order.id}/status`)
+      .set("Authorization", `Bearer ${managerToken}`)
+      .send({ status: "ready" });
+    const completedResponse = await request(app)
+      .patch(`/api/orders/${orderRes.body.order.id}/status`)
+      .set("Authorization", `Bearer ${managerToken}`)
+      .send({ status: "completed" });
+
+    expect(response.status).toBe(200);
+    expect(readyResponse.status).toBe(200);
+    expect(completedResponse.status).toBe(200);
+  });
+});
