@@ -30,6 +30,8 @@ import ReservationModel from "../models/Reservation";
 import WaiterCallModel from "../models/WaiterCall";
 // A2: sipariş tamamlamada envanter stok düşümü.
 import { decrementInventoryForOrder, syncProductStockFlags } from "../services/inventory.js";
+// B4: aktif abonelik indiriminin siparişe uygulanması.
+import { applySubscriptionDiscountToOrder } from "../services/subscriptionDiscount.js";
 import PushSubscriptionModel from "../models/PushSubscription.js";
 import { getVapidKeys } from "../config/vapid.js";
 import {
@@ -2492,7 +2494,21 @@ router.post("/orders", attachAuth, async (req, res) => {
     }
   }
 
-  const totalDiscount = Number((stampDiscount.discountTotal + discountTotal + (appliedCoupon?.discountAmount || 0)).toFixed(2));
+  // B4: abonelik indirimi zincirin son halkası — sadakat/kupon
+  // indirimlerinden kalan tutara, aktif planın discountPercent'i uygulanır.
+  const subscriptionDiscount = await applySubscriptionDiscountToOrder(
+    req.authUser._id.toString(),
+    Math.max(0, afterCampaignDiscount - (appliedCoupon?.discountAmount || 0)),
+  );
+
+  const totalDiscount = Number(
+    (
+      stampDiscount.discountTotal +
+      discountTotal +
+      (appliedCoupon?.discountAmount || 0) +
+      subscriptionDiscount.discountTotal
+    ).toFixed(2),
+  );
   const total = Math.max(0, Number((subtotal - totalDiscount).toFixed(2)));
 
   const tableSessionToken = typeof req.body.tableSessionToken === "string" ? req.body.tableSessionToken.trim() : "";

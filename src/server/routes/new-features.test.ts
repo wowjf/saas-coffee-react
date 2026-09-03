@@ -653,3 +653,106 @@ describe("Sipariş tamamlamada envanter stok düşümü (A2)", () => {
     expect(completedResponse.status).toBe(200);
   });
 });
+
+// ============================================
+// B4: ABONELİK İNDİRİMİ SİPARİŞ AKIŞINDA
+// ============================================
+
+describe("Aktif abonelik indirimi siparişe uygulanır (B4)", () => {
+  it("aktif planlı abonenin siparişinden discountPercent kadar düşülür", async () => {
+    const SubscriptionPlanModel = (await import("../models/Subscription")).SubscriptionPlanModel;
+    const ProductModel = (await import("../models/Product")).default;
+
+    // %10 indirimli plan
+    const plan = await SubscriptionPlanModel.create({
+      name: "Test Kafe Pass",
+      description: "B4 test planı",
+      price: 100,
+      duration: "monthly",
+      benefits: ["%10 indirim"],
+      discountPercent: 10,
+      active: true,
+    });
+
+    const customer = await request(app).post("/api/auth/register").send({
+      name: "Abone",
+      surname: "Musteri",
+      username: "abone_musteri",
+      gender: "female",
+      email: "abone@test.com",
+      password: "gizli123",
+      phone: "05051119988",
+      birthDate: "1992-02-02",
+    });
+    const customerToken = customer.body.token as string;
+    const customerId = customer.body.user.id as string;
+
+    // Abone ol: bakiye 500 yükle, plan 100 → kalan 400
+    await UserModel.updateOne({ _id: customerId }, { $set: { balance: 500 } });
+    const subscribeRes = await request(app)
+      .post("/api/subscriptions/subscribe")
+      .set("Authorization", `Bearer ${customerToken}`)
+      .send({ planId: plan._id.toString() });
+    expect(subscribeRes.status).toBe(200);
+
+    const product = await ProductModel.create({
+      name: "B4 Abonelik Kahvesi",
+      description: "test",
+      price: 50,
+      category: "Sıcak İçecekler",
+      image: "",
+      ingredients: [],
+      inStock: true,
+    });
+
+    // 50 → %10 abonelik indirimi = 5 → toplam 45
+    const orderRes = await request(app)
+      .post("/api/orders")
+      .set("Authorization", `Bearer ${customerToken}`)
+      .send({ items: [{ productId: product._id.toString(), quantity: 1 }] });
+
+    expect(orderRes.status).toBe(201);
+    expect(orderRes.body.order.total).toBe(45);
+
+    // Bakiye: 400 - 45 = 355
+    const userAfter = await UserModel.findById(customerId);
+    expect(userAfter!.balance).toBe(355);
+  });
+
+  it("aboneliği olmayan müşteriye indirim uygulanmaz", async () => {
+    const ProductModel = (await import("../models/Product")).default;
+
+    const customer = await request(app).post("/api/auth/register").send({
+      name: "Abonesiz",
+      surname: "Musteri",
+      username: "abonesiz_musteri",
+      gender: "male",
+      email: "abonesiz@test.com",
+      password: "gizli123",
+      phone: "05051117788",
+      birthDate: "1991-01-01",
+    });
+    await UserModel.updateOne(
+      { _id: customer.body.user.id },
+      { $set: { balance: 100 } },
+    );
+
+    const product = await ProductModel.create({
+      name: "B4 Normal Kahvesi",
+      description: "test",
+      price: 50,
+      category: "Sıcak İçecekler",
+      image: "",
+      ingredients: [],
+      inStock: true,
+    });
+
+    const orderRes = await request(app)
+      .post("/api/orders")
+      .set("Authorization", `Bearer ${customer.body.token}`)
+      .send({ items: [{ productId: product._id.toString(), quantity: 1 }] });
+
+    expect(orderRes.status).toBe(201);
+    expect(orderRes.body.order.total).toBe(50);
+  });
+});

@@ -258,9 +258,8 @@ export interface LoyaltySummary {
   pointsBalance: number;
   availableRewards: LoyaltyRewardCampaign[];
   activePointReward?: User['activePointReward'];
-  pointsRewardThreshold?: number;
+  // Damga (stamp_card) hakları — stampStatus altında taşınır.
   pointsRewardCredits?: number;
-  pointsProgress?: number;
   stampStatus?: {
     campaignId: string;
     campaignTitle: string;
