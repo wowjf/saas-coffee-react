@@ -753,8 +753,81 @@ export const ManagerPanel: React.FC<{ activeTab: string }> = ({ activeTab }) => 
   const [logStartDate, setLogStartDate] = useState('');
   const [logEndDate, setLogEndDate] = useState('');
   const [logTimeFilter, setLogTimeFilter] = useState('');
-  const [cmsView, setCmsView] = useState<'dashboard' | 'products' | 'campaigns' | 'ingredients' | 'changes' | 'users' | 'tables' | 'languages'>('dashboard');
+  const [cmsView, setCmsView] = useState<'dashboard' | 'products' | 'campaigns' | 'ingredients' | 'changes' | 'users' | 'tables' | 'languages' | 'inventory'>('dashboard');
   const [productManagementView, setProductManagementView] = useState<'menu' | 'products' | 'categories' | 'ingredients'>('menu');
+
+  // C3: envanter yönetimi
+  const [inventoryItems, setInventoryItems] = useState<any[]>([]);
+  const [isLoadingInventory, setIsLoadingInventory] = useState(false);
+  const [inventoryFeedback, setInventoryFeedback] = useState('');
+  const [showAddInventoryModal, setShowAddInventoryModal] = useState(false);
+  const [newInventoryItem, setNewInventoryItem] = useState({ name: '', unit: 'kg', currentStock: 0, minStock: 0, reorderPoint: 0, supplier: '', costPerUnit: 0 });
+  const [restockDraft, setRestockDraft] = useState<Record<string, string>>({});
+
+  const fetchInventory = async () => {
+    try {
+      setIsLoadingInventory(true);
+      const data = await apiRequest<any[]>('/api/inventory');
+      setInventoryItems(Array.isArray(data) ? data : []);
+    } catch {
+      setInventoryFeedback('Envanter yüklenemedi.');
+    } finally {
+      setIsLoadingInventory(false);
+    }
+  };
+
+  useEffect(() => {
+    if (cmsView === 'inventory') {
+      fetchInventory();
+    }
+  }, [cmsView]);
+
+  const handleCreateInventoryItem = async () => {
+    const { name, unit } = newInventoryItem;
+    if (!name.trim() || !unit.trim()) {
+      setInventoryFeedback('Malzeme adı ve birimi zorunludur.');
+      return;
+    }
+    try {
+      await apiRequest('/api/inventory', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: name.trim(),
+          unit: unit.trim(),
+          currentStock: Number(newInventoryItem.currentStock) || 0,
+          minStock: Number(newInventoryItem.minStock) || 0,
+          reorderPoint: Number(newInventoryItem.reorderPoint) || 0,
+          supplier: newInventoryItem.supplier.trim(),
+          costPerUnit: Number(newInventoryItem.costPerUnit) || 0,
+        }),
+      });
+      setShowAddInventoryModal(false);
+      setNewInventoryItem({ name: '', unit: 'kg', currentStock: 0, minStock: 0, reorderPoint: 0, supplier: '', costPerUnit: 0 });
+      setInventoryFeedback('');
+      await fetchInventory();
+    } catch (err: any) {
+      setInventoryFeedback(err.message || 'Malzeme eklenemedi.');
+    }
+  };
+
+  const handleRestock = async (itemId: string) => {
+    const amount = Number(restockDraft[itemId]);
+    if (!amount || amount <= 0) {
+      setInventoryFeedback('Geçerli bir miktar girin.');
+      return;
+    }
+    try {
+      await apiRequest(`/api/inventory/${itemId}/movement`, {
+        method: 'POST',
+        body: JSON.stringify({ type: 'in', quantity: amount, reason: 'Panel stok girişi' }),
+      });
+      setRestockDraft((prev) => ({ ...prev, [itemId]: '' }));
+      setInventoryFeedback('');
+      await fetchInventory();
+    } catch (err: any) {
+      setInventoryFeedback(err.message || 'Stok girişi başarısız.');
+    }
+  };
   const [langSearchQuery, setLangSearchQuery] = useState('');
   const [langGroupFilter, setLangGroupFilter] = useState<'all' | string>('all');
   const [langOverrides, setLangOverrides] = useState<Record<string, string>>({});
@@ -2440,6 +2513,7 @@ export const ManagerPanel: React.FC<{ activeTab: string }> = ({ activeTab }) => 
               { label: t("kayitli-kullanicilar"), description: t("musteri-listesi"), icon: Users, onClick: () => setCmsView('users') },
               { label: t("masa-qr-kodlari"), description: '60 Masa Linki ve QR', icon: QrCode, onClick: () => setCmsView('tables') },
               { label: 'Dil Yönetimi', description: 'Sistem metinleri ve çeviriler', icon: Languages, onClick: () => setCmsView('languages') },
+              { label: 'Envanter', description: 'Malzeme stokları ve stok girişleri', icon: Package, onClick: () => setCmsView('inventory') },
             ].map((item: any, idx) => (
               <button 
                 key={idx} 
@@ -3810,6 +3884,172 @@ export const ManagerPanel: React.FC<{ activeTab: string }> = ({ activeTab }) => 
         {cmsView === 'tables' && (
           <TableQrManagement />
         )}
+
+        {cmsView === 'inventory' && (
+          <div className="space-y-5">
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="text-lg font-display font-bold">Malzeme Envanteri</h2>
+                <p className="text-xs text-text-secondary">Sipariş tamamlandıkça stoklar otomatik düşer; eşik altındakiler uyarı üretir.</p>
+              </div>
+              <button
+                onClick={() => setShowAddInventoryModal(true)}
+                className="px-4 py-2.5 rounded-xl bg-black text-white text-xs font-bold active:scale-95 transition-transform"
+              >
+                + Malzeme
+              </button>
+            </div>
+
+            {inventoryFeedback && (
+              <div className="p-3 rounded-2xl bg-red-50 border border-red-100 text-xs font-semibold text-red-700">{inventoryFeedback}</div>
+            )}
+
+            {isLoadingInventory ? (
+              <div className="py-12 text-center text-text-secondary text-sm">Envanter yükleniyor…</div>
+            ) : inventoryItems.length === 0 ? (
+              <div className="py-12 text-center space-y-2">
+                <p className="text-sm text-text-secondary">Henüz malzeme kaydı yok.</p>
+                <p className="text-xs text-text-secondary/70">Ürünlerin malzeme adlarıyla eşleşen kayıtları otomatik stok düşümü için kullanılır.</p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {inventoryItems.map((item) => {
+                  const isLow = item.currentStock <= (item.reorderPoint || 0);
+                  return (
+                    <div
+                      key={item.id}
+                      className={`bg-white border rounded-2xl p-4 shadow-sm ${isLow ? 'border-red-200' : 'border-border'}`}
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-sm font-bold text-black">{item.name}</span>
+                            <span className="text-[10px] font-bold px-2 py-0.5 rounded-lg bg-surface text-text-secondary uppercase">{item.unit}</span>
+                            {isLow && (
+                              <span className="text-[9px] font-bold px-2 py-0.5 rounded-lg bg-red-100 text-red-700 uppercase tracking-wider">Düşük Stok</span>
+                            )}
+                          </div>
+                          <p className="text-xs text-text-secondary mt-1">
+                            Stok: <strong className={isLow ? 'text-red-600' : 'text-black'}>{item.currentStock}</strong> {item.unit}
+                            {' • '}Yeniden sipariş: {item.reorderPoint || 0}
+                            {item.supplier ? ` • ${item.supplier}` : ''}
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.5"
+                            placeholder="Miktar"
+                            value={restockDraft[item.id] ?? ''}
+                            onChange={(e) => setRestockDraft((prev) => ({ ...prev, [item.id]: e.target.value }))}
+                            className="w-20 px-2 py-2 rounded-xl bg-surface border border-border text-xs text-center focus:outline-none focus:border-black"
+                          />
+                          <button
+                            onClick={() => handleRestock(item.id)}
+                            className="px-3 py-2 rounded-xl bg-green-600 text-white text-xs font-bold active:scale-95 transition-transform"
+                          >
+                            Stok Girişi
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* C3: Yeni Malzeme Modalı */}
+        <AnimatePresence>
+          {showAddInventoryModal && (
+            <div className="fixed inset-0 z-[110] flex items-center justify-center p-6">
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                onClick={() => setShowAddInventoryModal(false)}
+                className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+              />
+              <motion.div
+                initial={{ scale: 0.9, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.9, opacity: 0 }}
+                className="bg-white rounded-[32px] p-8 w-full max-w-sm relative z-10 space-y-5 shadow-2xl"
+              >
+                <h3 className="text-xl font-display font-bold">Yeni Malzeme</h3>
+                <div className="space-y-3">
+                  <div>
+                    <label className="text-[10px] font-bold text-text-secondary uppercase tracking-wider">Malzeme Adı</label>
+                    <input
+                      value={newInventoryItem.name}
+                      onChange={(e) => setNewInventoryItem({ ...newInventoryItem, name: e.target.value })}
+                      placeholder="örn. Espresso Çekirdeği"
+                      className="w-full mt-1 px-3 py-2.5 rounded-xl bg-surface border border-border text-sm focus:outline-none focus:border-black"
+                    />
+                    <p className="text-[10px] text-text-secondary mt-1">Ürün malzemeleriyle aynı adı kullanın — otomatik stok düşümü ad eşleşmesiyle çalışır.</p>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="text-[10px] font-bold text-text-secondary uppercase tracking-wider">Birim</label>
+                      <input
+                        value={newInventoryItem.unit}
+                        onChange={(e) => setNewInventoryItem({ ...newInventoryItem, unit: e.target.value })}
+                        placeholder="kg / litre / adet"
+                        className="w-full mt-1 px-3 py-2.5 rounded-xl bg-surface border border-border text-sm focus:outline-none focus:border-black"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[10px] font-bold text-text-secondary uppercase tracking-wider">Mevcut Stok</label>
+                      <input
+                        type="number"
+                        min="0"
+                        value={newInventoryItem.currentStock}
+                        onChange={(e) => setNewInventoryItem({ ...newInventoryItem, currentStock: Number(e.target.value) })}
+                        className="w-full mt-1 px-3 py-2.5 rounded-xl bg-surface border border-border text-sm focus:outline-none focus:border-black"
+                      />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="text-[10px] font-bold text-text-secondary uppercase tracking-wider">Yeniden Sipariş Noktası</label>
+                      <input
+                        type="number"
+                        min="0"
+                        value={newInventoryItem.reorderPoint}
+                        onChange={(e) => setNewInventoryItem({ ...newInventoryItem, reorderPoint: Number(e.target.value) })}
+                        className="w-full mt-1 px-3 py-2.5 rounded-xl bg-surface border border-border text-sm focus:outline-none focus:border-black"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[10px] font-bold text-text-secondary uppercase tracking-wider">Tedarikçi</label>
+                      <input
+                        value={newInventoryItem.supplier}
+                        onChange={(e) => setNewInventoryItem({ ...newInventoryItem, supplier: e.target.value })}
+                        className="w-full mt-1 px-3 py-2.5 rounded-xl bg-surface border border-border text-sm focus:outline-none focus:border-black"
+                      />
+                    </div>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-3 pt-2">
+                  <button
+                    onClick={() => setShowAddInventoryModal(false)}
+                    className="py-3 rounded-xl border border-border text-sm font-semibold"
+                  >
+                    Vazgeç
+                  </button>
+                  <button
+                    onClick={handleCreateInventoryItem}
+                    className="py-3 rounded-xl bg-black text-white text-sm font-bold active:scale-95 transition-transform"
+                  >
+                    Ekle
+                  </button>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
 
         {/* Add/Edit Ingredient Modal */}
         <AnimatePresence>
