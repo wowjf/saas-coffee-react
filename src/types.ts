@@ -258,6 +258,10 @@ export interface LoyaltySummary {
   pointsBalance: number;
   availableRewards: LoyaltyRewardCampaign[];
   activePointReward?: User['activePointReward'];
+  // D1: VIP durumu — puan bakiyesi, VIP eşikli kampanyaların en düşük
+  // eşiğine ulaştıysa true (eşik tanımlı hiç kampanya yoksa false).
+  isVip?: boolean;
+  vipThreshold?: number;
   // Damga (stamp_card) hakları — stampStatus altında taşınır.
   pointsRewardCredits?: number;
   stampStatus?: {

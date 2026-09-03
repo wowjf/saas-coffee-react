@@ -353,6 +353,7 @@ export const CustomerPanel: React.FC<{ activeTab: string }> = ({ activeTab }) =>
     cart,
     setCart,
     deleteNotification,
+  markAllNotificationsRead,
     clearNotifications,
     markNotificationRead,
     updateUser,
@@ -1579,7 +1580,15 @@ export const CustomerPanel: React.FC<{ activeTab: string }> = ({ activeTab }) =>
     const desktopNotificationsContent = (
       <div className="max-w-7xl mx-auto h-full p-4 sm:p-6 pb-32 md:pb-6 flex flex-col">
         {user && notifications.length > 0 && (
-          <div className="flex justify-end mb-4">
+          <div className="flex justify-end gap-2 mb-4">
+            {notifications.some(n => !n.read) && (
+              <button 
+                onClick={() => markAllNotificationsRead()}
+                className="text-[10px] font-bold text-blue-600 uppercase tracking-widest px-3.5 py-2 rounded-xl hover:bg-blue-50 transition-colors border border-blue-200 bg-blue-50/10 cursor-pointer"
+              >
+                Tümünü Okundu İşaretle
+              </button>
+            )}
             <button 
               onClick={clearNotifications}
               className="text-[10px] font-bold text-red-500 uppercase tracking-widest px-3.5 py-2 rounded-xl hover:bg-red-50 transition-colors border border-red-200 bg-red-50/10 cursor-pointer"

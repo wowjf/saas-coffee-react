@@ -6,7 +6,7 @@ const NotificationSchema = new mongoose.Schema(
     targetRole: { type: String, enum: ["customer", "staff", "manager", ""], default: "", index: true },
     event: {
       type: String,
-      enum: ["order_preparing", "order_ready", "order_cancelled", "staff_new_order", ""],
+      enum: ["order_preparing", "order_ready", "order_cancelled", "staff_new_order", "inventory_low_stock", ""],
       default: "",
       index: true,
     },

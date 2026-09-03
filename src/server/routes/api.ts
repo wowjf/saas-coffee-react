@@ -403,7 +403,8 @@ async function clearExpiredSelectedCampaign(user: InstanceType<typeof UserModel>
 // Stable event identifiers decouple notification matching from display text.
 // Titles may be edited via system-texts without breaking role-based filtering.
 const CUSTOMER_NOTIFICATION_EVENTS = ["order_preparing", "order_ready", "order_cancelled"] as const;
-const STAFF_NOTIFICATION_EVENTS = ["staff_new_order"] as const;
+// D2: inventory_low_stock — eşik altı stok uyarıları personel kanalına düşer.
+const STAFF_NOTIFICATION_EVENTS = ["staff_new_order", "inventory_low_stock"] as const;
 
 type CustomerNotificationEvent = (typeof CUSTOMER_NOTIFICATION_EVENTS)[number];
 
@@ -2730,6 +2731,31 @@ router.get("/notifications", attachAuth, async (req, res) => {
 
 router.post("/notifications", attachAuth, async (req, res) => {
   return res.status(403).json({ message: await getSystemText("manuel-bildirim-olusturma-kapatildi") });
+});
+
+// C7: tüm bildirimleri okundu işaretle — kullanıcıya ait VEYA rolüne hedefli
+// okunmamış bildirimleri tek toplu update ile işaretler.
+router.patch("/notifications/read-all", attachAuth, async (req, res) => {
+  if (!req.authUser) {
+    return res.status(401).json({ message: await getSystemText("oturum-gerekli") });
+  }
+
+  const effectiveRole = getEffectiveRole(req.authUser);
+  const query = getNotificationQueryForUser(req.authUser);
+
+  if (!query) {
+    return res.json({ updatedCount: 0 });
+  }
+
+  const result = await NotificationModel.updateMany(
+    { ...query, read: false },
+    { $set: { read: true } },
+  );
+
+  // effectiveRole kullanımı okundu sayılır (query içinde zaten rollere göre filtre var)
+  void effectiveRole;
+
+  res.json({ updatedCount: result.modifiedCount || 0 });
 });
 
 router.patch("/notifications/:id/read", attachAuth, async (req, res) => {

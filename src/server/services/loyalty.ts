@@ -184,10 +184,20 @@ export async function buildLoyaltySummary(
       })()
     : null;
 
+  // D1: VIP eşiği — VIP eşikli (vipThreshold > 0) sadakat kampanyalarının en
+  // düşük eşiğine ulaşan müşteri VIP sayılır. Eşik eklemeden kampanya
+  // davranışı değişmez (geriye dönük uyumlu).
+  const vipThresholds = campaigns
+    .map((campaign) => Math.floor(campaign.vipThreshold || 0))
+    .filter((threshold) => threshold > 0);
+  const vipThreshold = vipThresholds.length > 0 ? Math.min(...vipThresholds) : 0;
+
   return {
     pointsBalance,
     availableRewards: await buildRewardCampaigns(campaigns, pointsBalance, activePointReward),
     activePointReward,
+    isVip: vipThreshold > 0 && pointsBalance >= vipThreshold,
+    vipThreshold: vipThreshold > 0 ? vipThreshold : undefined,
     stampStatus,
     // pointsRewardCredits: aktif damga kampanyasindan kazanilan hazir haklar.
     pointsRewardCredits: stampStatus ? stampStatus.rewardCredits : 0,

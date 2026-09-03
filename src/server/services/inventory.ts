@@ -20,7 +20,7 @@ const CONSUMPTION_PER_UNIT = 1;
 
 async function createLowStockNotification(item: { name: string; remainingStock: number; reorderPoint: number }) {
   await NotificationModel.create({
-    event: "staff_new_order",
+    event: "inventory_low_stock",
     title: "Stok Uyarısı",
     message: `${item.name} stoku kritik seviyede: ${item.remainingStock} (yeniden sipariş noktası: ${item.reorderPoint}).`,
     type: "warning",

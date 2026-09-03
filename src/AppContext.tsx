@@ -27,6 +27,7 @@ interface AppContextType {
   setOrders: React.Dispatch<React.SetStateAction<Order[]>>;
   notifications: Notification[];
   markNotificationRead: (id: string) => Promise<void>;
+  markAllNotificationsRead: () => Promise<void>;
   deleteNotification: (id: string) => Promise<void>;
   // C6: mutasyon sonrası anında senkron (hediye bakiyesi vb. dış bileşenler için)
   syncAfterMutation: () => Promise<void>;
@@ -434,6 +435,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       await syncAfterMutation();
     },
     [syncAfterMutation],
+  );
+
+  // C7: tüm bildirimleri okundu işaretle (kullanıcıya ait + rol hedefli).
+  const markAllNotificationsRead = useCallback(
+    async () => {
+      try {
+        await apiRequest("/api/notifications/read-all", { method: "PATCH" });
+        setServerNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
+      } catch {
+        // best-effort; sonraki bootstrap tazeler
+      }
+    },
+    [],
   );
 
   const deleteNotification = useCallback(
@@ -859,6 +873,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setOrders,
       notifications,
       markNotificationRead,
+      markAllNotificationsRead,
       deleteNotification,
       syncAfterMutation,
       clearNotifications,
