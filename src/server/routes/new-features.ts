@@ -28,6 +28,8 @@ import {
   invalidateSystemTextCache,
   listSystemTextOverrides,
 } from "../services/systemTexts.js";
+// MP-3.1: SSE kanalına olay yayını — garson çağrısı ve sohbet mesajları.
+import { publishToManagers, publishToUser } from "../services/eventBus.js";
 import { getSystemText } from "../services/systemTexts";
 import { calculateCouponDiscount } from "../services/coupon.js";
 
@@ -1026,6 +1028,25 @@ router.post("/chat/:roomId/message", attachAuth, async (req: AuthRequest, res) =
     room.messages.push(newMessage as any);
     room.lastMessageAt = newMessage.timestamp;
 
+    // MP-3.1: SSE — mesaj karşı tarafa anlık iletilir. Müşteri gönderdiyse
+    // personel kanalı, personel gönderdiyse müşteri kanalı hedeflenir.
+    const chatEvent = {
+      roomId,
+      senderId: userId,
+      senderName: userName,
+      senderRole: userRole,
+      message,
+      timestamp: newMessage.timestamp,
+    };
+    if (["staff", "manager"].includes(userRole)) {
+      publishToUser(room.customerId, "chat_message", chatEvent);
+    } else {
+      // Müşteriden gelen mesajı görüntüleyen tüm personel/yönetici alır.
+      if (["waiting", "active"].includes(room.status)) {
+        publishToManagers("chat_message", chatEvent);
+      }
+    }
+
     // If staff/manager sends message, mark as active
     if (["staff", "manager"].includes(userRole) && room.status === "waiting") {
       room.status = "active";
@@ -1296,6 +1317,16 @@ router.post("/waiter-calls", attachAuth, async (req: AuthRequest, res) => {
       priority: priority || "normal",
       status: "pending",
       createdAt: new Date(),
+    });
+
+    // MP-3.1: SSE — personel/yönetici panellerine anlık garson çağrısı olayı.
+    publishToManagers("waiter_call_new", {
+      id: call._id.toString(),
+      tableNumber,
+      type,
+      priority: priority || "normal",
+      message: message || "",
+      userName,
     });
 
     return res.json(serializeWaiterCall(call));

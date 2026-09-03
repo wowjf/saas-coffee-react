@@ -37,6 +37,8 @@ import {
   sendPushToRole,
   sendPushToSubscription,
 } from "../services/pushNotification.js";
+// MP-3.1: SSE kanalına olay yayını — bildirim oluşturma noktalarında realtime push.
+import { publishToUser, publishToManagers } from "../services/eventBus.js";
 import {
   applyActivePointRewardToOrder,
   applyStampRewardCreditsToOrder,
@@ -453,6 +455,9 @@ async function createCustomerOrderNotification(
     timestamp: new Date(),
   });
 
+  // MP-3.1: SSE — bağlı istemciye (müşteri paneli) anlık olay gönderimi.
+  publishToUser(userId, event, { orderId: orderId || "" });
+
   // Dispatch Web Push notification to user / order device(s)
   let body = title;
   if (event === "order_preparing") {
@@ -498,6 +503,14 @@ async function createStaffOrderNotification(details?: { tableNumber?: string; or
     targetRole: "staff",
     read: false,
     timestamp: new Date(),
+  });
+
+  // MP-3.1: SSE — personel/yönetici panellerine anlık yeni sipariş olayı.
+  publishToManagers("staff_new_order", {
+    orderId: details?.orderId || "",
+    tableNumber: details?.tableNumber || "",
+    total: details?.total || 0,
+    message,
   });
 
   sendPushToRole(["staff", "manager"], {

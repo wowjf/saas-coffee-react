@@ -1017,3 +1017,110 @@ describe("POST /api/orders table session balance guard (MP-2.5)", () => {
     expect(third.status).toBe(201);
   });
 });
+
+
+describe("SSE olay yayını (MP-3.1)", () => {
+  it("yeni sipariş staff_new_order olayını yönetici SSE kanalına yayınlar", async () => {
+    // Yönetici kanalına sanal abone aç
+    const { subscribeAsManager } = await import("../services/eventBus.js");
+    const events: Array<{ type: string; payload: any }> = [];
+    const unsubscribe = subscribeAsManager((event) => {
+      events.push(event);
+    });
+
+    try {
+      // Müşteri + ürün hazırla
+      const { token: customerToken, userId: customerUserId } = await getTokenFor({
+        email: "sse-musteri@test.com",
+        username: "sse_musteri",
+      });
+      await UserModel.updateOne({ _id: customerUserId }, { $set: { balance: 100 } });
+
+      const product = await ProductModel.create({
+        name: "SSE Test Kahvesi",
+        description: "SSE yayını testi",
+        price: 20,
+        category: "Sıcak İçecekler",
+        image: "",
+        ingredients: [],
+        inStock: true,
+      });
+
+      const orderResponse = await request(app)
+        .post("/api/orders")
+        .set("Authorization", `Bearer ${customerToken}`)
+        .send({ items: [{ productId: product._id.toString(), quantity: 1 }] });
+
+      expect(orderResponse.status).toBe(201);
+
+      // Olay eşzamanlı (senkron) yayınlanır — abone listesinde olmalı
+      const orderEvent = events.find((event) => event.type === "staff_new_order");
+      expect(orderEvent).toBeTruthy();
+      expect(orderEvent!.payload.orderId).toBe(orderResponse.body.order.id);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it("sipariş durumu değişimi müşteriye order_ready olayı yayınlar", async () => {
+    const { subscribe } = await import("../services/eventBus.js");
+
+    const { token: customerToken, userId: customerId } = await getTokenFor({
+      email: "sse-hazir@test.com",
+      username: "sse_hazir",
+    });
+    await UserModel.updateOne({ _id: customerId }, { $set: { balance: 100 } });
+
+    const product = await ProductModel.create({
+      name: "SSE Test Çayı",
+      description: "SSE yayını testi",
+      price: 15,
+      category: "Sıcak İçecekler",
+      image: "",
+      ingredients: [],
+      inStock: true,
+    });
+
+    const orderResponse = await request(app)
+      .post("/api/orders")
+      .set("Authorization", `Bearer ${customerToken}`)
+      .send({ items: [{ productId: product._id.toString(), quantity: 1 }] });
+    const orderId = orderResponse.body.order.id as string;
+
+    const events: Array<{ type: string; payload: any }> = [];
+    const unsubscribe = subscribe(customerId, (event) => {
+      events.push(event);
+    });
+
+    try {
+      // Yönetici siparişi hazıra çeker
+      const { token: managerToken } = await createManagerAndGetToken("sse-yonetici@test.com");
+      await request(app)
+        .post("/api/auth/session-role")
+        .set("Authorization", `Bearer ${managerToken}`)
+        .send({ role: "manager" });
+
+      // Durum makinesi: pending → preparing → ready
+      await request(app)
+        .patch(`/api/orders/${orderId}/status`)
+        .set("Authorization", `Bearer ${managerToken}`)
+        .send({ status: "preparing" });
+
+      const statusResponse = await request(app)
+        .patch(`/api/orders/${orderId}/status`)
+        .set("Authorization", `Bearer ${managerToken}`)
+        .send({ status: "ready" });
+
+      expect(statusResponse.status).toBe(200);
+
+      const readyEvent = events.find((event) => event.type === "order_ready");
+      expect(readyEvent).toBeTruthy();
+      expect(readyEvent!.payload.orderId).toBe(orderId);
+      // Hazırlanmaya başlanma olayı da yayınlanmış olmalı
+      const preparingEvent = events.find((event) => event.type === "order_preparing");
+      expect(preparingEvent).toBeTruthy();
+    } finally {
+      unsubscribe();
+    }
+  });
+});

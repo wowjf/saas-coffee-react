@@ -277,10 +277,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return undefined;
     }
 
-    // MP-0.9: rol bazlı polling aralığı — manager açıkken bootstrap 5 sn'den
-    // 15 sn'ye iner (ağır veriler zaten admin/overview'dan geliyor), diğer
-    // rollerdeki canlılık (sipariş/bildirim akışı) önceki davranışı korur.
-    const intervalMs = role === "manager" ? 15000 : 5000;
+    // MP-3.1: canlılık iki kanaldan sağlanır — (1) /api/events SSE akışı olay
+    // anında refresh tetikler, (2) polling yalnızca SSE düşerse (bağlantı
+    // kopması, eski tarayıcı) yedek olarak devreye girer. Bu yüzden
+    // aralıklar gevşetildi: SSE aktifken bu sayaç nadiren ateşlenir.
+    const intervalMs = role === "manager" ? 60000 : 30000;
 
     const interval = window.setInterval(() => {
       void refreshBootstrap();
@@ -288,6 +289,39 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     return () => window.clearInterval(interval);
   }, [refreshBootstrap, role, user]);
+
+  // MP-3.1: SSE (Server-Sent Events) aboneliği — sunucudaki olaylar
+  // (sipariş durumu, yeni sipariş, garson çağrısı, sohbet mesajı) bu kanaldan
+  // gelir; EventSource header ekleyemediği için token sorgu parametresiyle
+  // taşınır. Olay geldiğinde ilgili veri anında yenilenir; bağlantı koparsa
+  // tarayıcı otomatik yeniden bağlanır (yukarıdaki polling yedektir).
+  useEffect(() => {
+    if (!user || !token) {
+      return undefined;
+    }
+
+    const source = new EventSource(`/api/events?token=${encodeURIComponent(token)}`);
+
+    const refreshOnEvent = () => {
+      void refreshBootstrap();
+      if (role === "manager") {
+        void refreshAdminOverview();
+      }
+    };
+
+    // Sipariş durumu değişimleri: müşteri kendi siparişini, personel/yönetici
+    // yeni sipariş akışını bu olaylarla alır.
+    source.addEventListener("order_preparing", refreshOnEvent);
+    source.addEventListener("order_ready", refreshOnEvent);
+    source.addEventListener("order_cancelled", refreshOnEvent);
+    source.addEventListener("staff_new_order", refreshOnEvent);
+    source.addEventListener("waiter_call_new", refreshOnEvent);
+    source.addEventListener("chat_message", refreshOnEvent);
+
+    return () => {
+      source.close();
+    };
+  }, [refreshAdminOverview, refreshBootstrap, role, token, user]);
 
   useEffect(() => {
     if (!user || role !== "manager") {
