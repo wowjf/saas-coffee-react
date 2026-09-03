@@ -47,7 +47,7 @@ interface AppContextType {
     password: string
   ) => Promise<void>;
   resetPassword: (email: string) => Promise<void>;
-  createOrder: (order: Omit<Order, "id">) => Promise<void>;
+  createOrder: (order: Omit<Order, "id">, options?: { couponCode?: string }) => Promise<void>;
   updateOrderStatus: (
     orderId: string,
     status: Order["status"],
@@ -448,8 +448,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   );
 
   const createOrder = useCallback(
-    async (order: Omit<Order, "id">) => {
-      await apiRequest("/api/orders", {
+    async (order: Omit<Order, "id">, options?: { couponCode?: string }) => {
+      const response = await apiRequest<{ couponWarning?: string }>("/api/orders", {
         method: "POST",
         body: JSON.stringify({
           items: order.items.map((item) => ({
@@ -458,8 +458,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           })),
           note: order.note || "",
           tableSessionToken: tableSessionToken || undefined,
+          couponCode: options?.couponCode || undefined,
         }),
       });
+
+      // Kupon kosullari tutmadiysa siparis yine de olustu — kullaniciya
+      // neden indirimsiz kaldigini bildir.
+      if (response?.couponWarning) {
+        alert(response.couponWarning);
+      }
+
       await syncAfterMutation();
     },
     [syncAfterMutation, tableSessionToken],

@@ -364,6 +364,7 @@ export const CustomerPanel: React.FC<{ activeTab: string }> = ({ activeTab }) =>
   const [topUpAmount, setTopUpAmount] = useState<string>('');
   const [showCartModal, setShowCartModal] = useState(false);
   const [orderNote, setOrderNote] = useState('');
+  const [couponCode, setCouponCode] = useState('');
   const [ordersView, setOrdersView] = useState<'hub' | 'list'>('hub');
   const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
   const [selectedNotificationId, setSelectedNotificationId] = useState<string | null>(null);
@@ -886,9 +887,10 @@ export const CustomerPanel: React.FC<{ activeTab: string }> = ({ activeTab }) =>
       timestamp: new Date().toISOString(),
       note: orderNote.trim() || undefined
     };
-    await createOrder(orderData);
+    await createOrder(orderData, { couponCode: couponCode.trim() || undefined });
     setCart([]);
     setOrderNote('');
+    setCouponCode('');
     setShowCartModal(false);
   };
 
@@ -1171,6 +1173,18 @@ export const CustomerPanel: React.FC<{ activeTab: string }> = ({ activeTab }) =>
           {/* Order Notes & Checkout */}
           {cart.length > 0 && (
             <div className="pt-4 border-t border-border space-y-4 bg-white">
+              <div className="space-y-1.5">
+                <label className="text-[9px] font-bold text-zinc-400 uppercase tracking-widest">{t("kupon-kodu")}</label>
+                <input
+                  value={couponCode}
+                  onChange={(e) => setCouponCode(e.target.value.toUpperCase())}
+                  placeholder={t("kupon-kodu-giriniz")}
+                  className="w-full p-3 rounded-xl bg-zinc-50 border border-border/80 text-xs focus:outline-none focus:border-black transition-all"
+                />
+                <p className="text-[10px] text-zinc-400">
+                  {t("kupon-onayda-uygulanir")}
+                </p>
+              </div>
               <div className="space-y-1.5">
                 <label className="text-[9px] font-bold text-zinc-400 uppercase tracking-widest">{t("siparis-notu")}</label>
                 <textarea 

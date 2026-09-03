@@ -58,6 +58,7 @@ const OrderSchema = new mongoose.Schema(
       expiresAt: { type: String, default: "" },
     },
     appliedCoupon: {
+      couponId: { type: String, default: "" },
       code: { type: String, default: "" },
       discountAmount: { type: Number, default: 0 },
     },

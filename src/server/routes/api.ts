@@ -5,6 +5,7 @@ import jwt from "jsonwebtoken";
 import multer from "multer";
 import { attachAuth, attachOptionalAuth, restrictTo, type AuthRequest } from "../middleware/auth";
 import { autoAsyncHandlers } from "../middleware/asyncHandler";
+import { redeemCouponForOrder, refundCouponUsage } from "../services/coupon";
 import { ApiError } from "../middleware/errorHandler";
 import UserModel from "../models/User";
 import ProductModel from "../models/Product";
@@ -2446,10 +2447,38 @@ router.post("/orders", attachAuth, async (req, res) => {
 
   const subtotal = normalizedItems.reduce((sum, item) => sum + item.product.price * item.quantity, 0);
   // Damga (stamp) bedava urun haklari once harcanir; puan kampanyasi
-  // indirimi kalan tutara uygulanir — iki indirim ayni birime binmez.
+  // indirimi kalan tutara, kupon en sonda uygulanir — indirimler ayni
+  // birime binmez, her adim oncekinden kalan tutar uzerinde calisir.
   const stampDiscount = await applyStampRewardCreditsToOrder(req.authUser, normalizedItems);
   const { discountTotal, appliedCampaign } = await applyActivePointRewardToOrder(req.authUser, normalizedItems);
-  const totalDiscount = Number((stampDiscount.discountTotal + discountTotal).toFixed(2));
+
+  // Kupon: kod verildiyse atomik kullanilir ve indirimi kalan tutara
+  // uygulanir. Gecersiz/kosullari tutmayan kupon siparisi BOZMAZ —
+  // aciklama mesajiyla reddedilir, siparis kuponuz devam eder.
+  let appliedCoupon: { couponId: string; code: string; discountAmount: number } | undefined;
+  let couponRejection: string | undefined;
+  const couponCode = typeof req.body.couponCode === "string" ? req.body.couponCode.trim() : "";
+  const afterCampaignDiscount = Number((subtotal - stampDiscount.discountTotal - discountTotal).toFixed(2));
+
+  if (couponCode) {
+    const couponResult = await redeemCouponForOrder(
+      req.authUser._id.toString(),
+      couponCode,
+      Math.max(0, afterCampaignDiscount),
+    );
+
+    if (couponResult.status === "applied") {
+      appliedCoupon = {
+        couponId: couponResult.couponId,
+        code: couponResult.code,
+        discountAmount: couponResult.discountAmount,
+      };
+    } else {
+      couponRejection = couponResult.reason;
+    }
+  }
+
+  const totalDiscount = Number((stampDiscount.discountTotal + discountTotal + (appliedCoupon?.discountAmount || 0)).toFixed(2));
   const total = Math.max(0, Number((subtotal - totalDiscount).toFixed(2)));
 
   const tableSessionToken = typeof req.body.tableSessionToken === "string" ? req.body.tableSessionToken.trim() : "";
@@ -2529,6 +2558,7 @@ router.post("/orders", attachAuth, async (req, res) => {
     note: String(req.body.note || ""),
     cancelReason: "",
     appliedCampaign,
+    appliedCoupon,
   });
 
   await createStaffOrderNotification({ tableNumber: order.tableNumber, orderId: order._id.toString(), total: order.total });
@@ -2536,6 +2566,8 @@ router.post("/orders", attachAuth, async (req, res) => {
   return res.status(201).json({
     order: serializeOrder(order),
     user: serializeUser(req.authUser),
+    // Kupon reddedildiyse siparis yine de olustu — istemci mesaji gosterir.
+    couponWarning: couponRejection,
   });
 });
 
@@ -2607,6 +2639,13 @@ router.patch("/orders/:id/status", attachAuth, restrictTo("staff", "manager"), a
         { $inc: { balance: refundTotal } },
       );
     }
+
+    // Kupon iadesi: siparis reddedildiyse kullanici hakki geri alir;
+    // status guard'i bu blogu tek sefer yapar (idempotent).
+    if (order.appliedCoupon?.couponId) {
+      await refundCouponUsage(order.appliedCoupon.couponId, order.userId);
+    }
+
     await createCustomerOrderNotification(order.userId, "order_cancelled", order._id.toString());
   }
 
