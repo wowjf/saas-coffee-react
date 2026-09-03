@@ -38,6 +38,7 @@ import {
 } from "../services/pushNotification.js";
 import {
   applyActivePointRewardToOrder,
+  applyStampRewardCreditsToOrder,
   applyCompletedOrderLoyalty,
   buildLoyaltyScanResult,
   buildLoyaltySummary,
@@ -1595,7 +1596,10 @@ router.get("/loyalty/qr", attachAuth, restrictTo("customer"), async (req, res) =
   }
 
   try {
-    const { token, expiresAt } = createLoyaltyQrToken(req.authUser._id.toString());
+    const { token, expiresAt } = createLoyaltyQrToken(
+      req.authUser._id.toString(),
+      req.authUser.tokenVersion ?? 0,
+    );
 
     return res.json({
       token,
@@ -2441,8 +2445,12 @@ router.post("/orders", attachAuth, async (req, res) => {
   );
 
   const subtotal = normalizedItems.reduce((sum, item) => sum + item.product.price * item.quantity, 0);
+  // Damga (stamp) bedava urun haklari once harcanir; puan kampanyasi
+  // indirimi kalan tutara uygulanir — iki indirim ayni birime binmez.
+  const stampDiscount = await applyStampRewardCreditsToOrder(req.authUser, normalizedItems);
   const { discountTotal, appliedCampaign } = await applyActivePointRewardToOrder(req.authUser, normalizedItems);
-  const total = Math.max(0, Number((subtotal - discountTotal).toFixed(2)));
+  const totalDiscount = Number((stampDiscount.discountTotal + discountTotal).toFixed(2));
+  const total = Math.max(0, Number((subtotal - totalDiscount).toFixed(2)));
 
   const tableSessionToken = typeof req.body.tableSessionToken === "string" ? req.body.tableSessionToken.trim() : "";
   let tableNumber = "";

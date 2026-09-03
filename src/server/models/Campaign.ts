@@ -63,6 +63,9 @@ const CampaignSchema = new mongoose.Schema(
     minOrderAmount: { type: Number, default: 0 },
     fixedGiftAmount: { type: Number, default: 0 },
     pointsCost: { type: Number, default: 0 },
+    // Damga (stamp_card) kampanyasi: bu kadar kalem tamamlandiginda 1
+    // ucretsiz urun hakki verilir.
+    requiredQuantity: { type: Number, default: 5, min: 1 },
     usageLimit: { type: Number, default: 1 },
     validityHours: { type: Number, default: 24 },
     targetType: { type: String, enum: ["all", "category", "product"], default: "all" },

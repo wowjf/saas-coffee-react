@@ -63,6 +63,9 @@ const OrderSchema = new mongoose.Schema(
     },
     loyaltyProcessed: { type: Boolean, default: false },
     loyaltyPointsAwarded: { type: Number, default: 0 },
+    // Damga sadakati: bu siparisle eklenen damga sayisi ((serializer
+    // ayiklar; istemciye LoyaltySummary uzerinden tasinir).
+    loyaltyStampCountAwarded: { type: Number, default: 0 },
     completedBy: {
       id: { type: String, default: "" },
       name: { type: String, default: "" },

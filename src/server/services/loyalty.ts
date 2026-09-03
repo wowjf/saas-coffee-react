@@ -20,6 +20,9 @@ import { getSystemText } from "./systemTexts";
 type LoyaltyQrTokenPayload = {
   purpose: "loyalty";
   userId: string;
+  // MP-2.1 uyumu: sadakat QR'ı da oturum JWT'si gibi tokenVersion taşır;
+  // parola değişimi/logout/rol düşürme aktif QR'yı da düşürer.
+  tokenVersion?: number;
 };
 
 function getLoyaltyJwtSecret() {
@@ -134,25 +137,70 @@ async function buildRewardCampaigns(
   });
 }
 
+async function getActiveStampCampaign(): Promise<Campaign | null> {
+  const documents = await CampaignModel.find({ active: true, type: "stamp_card" }).sort({ createdAt: 1 });
+
+  for (const document of documents) {
+    const campaign = serializeDocument(document) as Campaign;
+
+    if (isCampaignActive(campaign)) {
+      return campaign;
+    }
+  }
+
+  return null;
+}
+
+function getStampRequiredQuantity(campaign: Pick<Campaign, "requiredQuantity">) {
+  return Math.max(1, Math.floor(campaign.requiredQuantity || 1));
+}
+
 export async function buildLoyaltySummary(
-  user: Pick<UserDocument, "points" | "activePointReward">,
+  user: Pick<UserDocument, "points" | "activePointReward"> & {
+    loyaltyStampProgress?: number;
+    loyaltyRewardCredits?: number;
+  },
 ): Promise<LoyaltySummary> {
   const pointsBalance = Math.max(0, user.points || 0);
   const campaigns = await getActivePointRewardCampaigns();
   const activePointReward = getValidActivePointReward(user);
 
+  const stampCampaign = await getActiveStampCampaign();
+  const stampStatus = stampCampaign
+    ? (() => {
+        const requiredQuantity = getStampRequiredQuantity(stampCampaign);
+        const currentProgress = Math.max(0, Math.floor(user.loyaltyStampProgress || 0));
+        const rewardCredits = Math.max(0, Math.floor(user.loyaltyRewardCredits || 0));
+
+        return {
+          campaignId: stampCampaign.id,
+          campaignTitle: stampCampaign.title,
+          requiredQuantity,
+          currentProgress: Math.min(currentProgress, requiredQuantity),
+          remainingToReward: Math.max(0, requiredQuantity - currentProgress),
+          rewardCredits,
+          targetProductId: stampCampaign.targetProductId || undefined,
+        };
+      })()
+    : null;
+
   return {
     pointsBalance,
     availableRewards: await buildRewardCampaigns(campaigns, pointsBalance, activePointReward),
     activePointReward,
+    stampStatus,
+    // pointsRewardCredits: aktif damga kampanyasindan kazanilan hazir haklar.
+    pointsRewardCredits: stampStatus ? stampStatus.rewardCredits : 0,
   };
 }
 
-export function createLoyaltyQrToken(userId: string) {
+export function createLoyaltyQrToken(userId: string, tokenVersion = 0) {
   const expiresIn = LOYALTY_QR_TOKEN_TTL_SECONDS;
-  const token = jwt.sign({ purpose: "loyalty", userId } satisfies LoyaltyQrTokenPayload, getLoyaltyJwtSecret(), {
-    expiresIn,
-  });
+  const token = jwt.sign(
+    { purpose: "loyalty", userId, tokenVersion } satisfies LoyaltyQrTokenPayload,
+    getLoyaltyJwtSecret(),
+    { expiresIn },
+  );
 
   return {
     token,
@@ -180,7 +228,66 @@ export async function resolveLoyaltyToken(token: string) {
     throw new Error(await getSystemText("bu-qr-kodu-bir-musteri-hesabina-ait-degil"));
   }
 
+  // MP-2.1: token iptal edilmişse (parola değişimi/logout) sadakat QR'ı da
+  // reddedilir. Versiyonsuz eski token'lar 0 kabul edilerek geriye dönük
+  // uyumludur — JWT doğrulamasındaki desenle aynı.
+  if ((decoded.tokenVersion ?? 0) !== (user.tokenVersion ?? 0)) {
+    throw new Error(await getSystemText("gecersiz-sadakat-qr-kodu"));
+  }
+
   return user;
+}
+
+async function awardStampsForOrder(order: OrderDocument) {
+  const stampCampaign = await getActiveStampCampaign();
+
+  if (!stampCampaign) {
+    return { stampCountAwarded: 0, rewardCreditsEarned: 0 };
+  }
+
+  const itemCount = order.items.reduce((total, item) => total + item.quantity, 0);
+  const requiredQuantity = getStampRequiredQuantity(stampCampaign);
+  const stampCountAwarded = Math.max(0, itemCount);
+
+  if (stampCountAwarded < 1) {
+    return { stampCountAwarded: 0, rewardCreditsEarned: 0 };
+  }
+
+  // Damga ekleme atomik $inc ile yapilir; esik kontrolu ve hak verişi
+  // ayri bir kosullu update'te — esige ulasan her turda progress
+  // requiredQuantity kadar dusurulur ve hak +1 artar.
+  await UserModel.updateOne({ _id: order.userId }, { $inc: { loyaltyStampProgress: stampCountAwarded } });
+
+  const stampUser = await UserModel.findById(order.userId);
+
+  if (!stampUser) {
+    return { stampCountAwarded, rewardCreditsEarned: 0 };
+  }
+
+  let rewardCreditsEarned = 0;
+  let progress = Math.max(0, stampUser.loyaltyStampProgress || 0);
+
+  while (progress >= requiredQuantity) {
+    const cycled = await UserModel.findOneAndUpdate(
+      { _id: order.userId, loyaltyStampProgress: { $gte: requiredQuantity } },
+      {
+        $inc: {
+          loyaltyStampProgress: -requiredQuantity,
+          loyaltyRewardCredits: 1,
+        },
+      },
+      { new: true },
+    );
+
+    if (!cycled) {
+      break;
+    }
+
+    rewardCreditsEarned += 1;
+    progress = Math.max(0, cycled.loyaltyStampProgress || 0);
+  }
+
+  return { stampCountAwarded, rewardCreditsEarned };
 }
 
 export async function applyCompletedOrderLoyalty(order: OrderDocument) {
@@ -204,38 +311,36 @@ export async function applyCompletedOrderLoyalty(order: OrderDocument) {
     Math.floor(Math.max(0, order.total || 0) / 10)
   );
 
-  if (pointsAwarded > 0) {
-    // MP-2.15: puan ekleme + siparişin işlendi olarak işaretlenmesi tek
-    // koşullu atomik update'te — iki eşzamanlı tamamlama isteği puanı
-    // iki kez veremez (loyaltyProcessed guard'ı sorgunun kendisinde).
-    const markedOrder = await OrderModel.findOneAndUpdate(
-      { _id: order._id, loyaltyProcessed: { $ne: true } },
-      { $set: { loyaltyProcessed: true, loyaltyPointsAwarded: pointsAwarded } },
-      { new: true },
-    );
+  // MP-2.15: isaretleme tek kosullu atomik update'te — iki eszamanli
+  // tamamlama istegi puani/damgayi iki kez veremez (guard sorgunun
+  // kendisinde). Damga (stamp) kazanimi da ayni guard'in arkasindadir.
+  const markedOrder = await OrderModel.findOneAndUpdate(
+    { _id: order._id, loyaltyProcessed: { $ne: true } },
+    { $set: { loyaltyProcessed: true, loyaltyPointsAwarded: pointsAwarded } },
+    { new: true },
+  );
 
-    if (!markedOrder) {
-      return {
-        pointsAwarded: order.loyaltyPointsAwarded || 0,
-      };
-    }
-
-    await UserModel.updateOne({ _id: order.userId }, { $inc: { points: pointsAwarded } });
-
-    order.loyaltyProcessed = true;
-    order.loyaltyPointsAwarded = pointsAwarded;
-
+  if (!markedOrder) {
     return {
-      pointsAwarded,
+      pointsAwarded: order.loyaltyPointsAwarded || 0,
     };
   }
 
+  if (pointsAwarded > 0) {
+    await UserModel.updateOne({ _id: order.userId }, { $inc: { points: pointsAwarded } });
+  }
+
+  const stampResult = await awardStampsForOrder(order);
+
   order.loyaltyProcessed = true;
-  order.loyaltyPointsAwarded = 0;
+  order.loyaltyPointsAwarded = pointsAwarded;
+  order.loyaltyStampCountAwarded = stampResult.stampCountAwarded;
   await order.save();
 
   return {
-    pointsAwarded: 0,
+    pointsAwarded,
+    stampCountAwarded: stampResult.stampCountAwarded,
+    rewardCreditsEarned: stampResult.rewardCreditsEarned,
   };
 }
 
@@ -350,6 +455,96 @@ export async function applyActivePointRewardToOrder(
       appliedQuantity,
       expiresAt: activePointReward.expiresAt,
     },
+  };
+}
+
+export async function applyStampRewardCreditsToOrder(
+  user: UserDocument,
+  items: Array<{
+    product: {
+      id: string;
+      price: number;
+      category: string;
+    };
+    quantity: number;
+  }>,
+) {
+  const credits = Math.max(0, Math.floor(user.loyaltyRewardCredits || 0));
+
+  if (credits < 1) {
+    return { discountTotal: 0, creditsUsed: 0 };
+  }
+
+  const stampCampaign = await getActiveStampCampaign();
+
+  if (!stampCampaign) {
+    return { discountTotal: 0, creditsUsed: 0 };
+  }
+
+  const targetProductId = stampCampaign.targetProductId || "";
+  const targetCategory = stampCampaign.targetCategory || "";
+  const hasTarget = !!(targetProductId || targetCategory);
+
+  if (!hasTarget) {
+    // Hedef tanimsizsa hak harcanamaz — kampanya yanlis yapilandirilmis;
+    // musterinin hakki yanmamasi icin sessizce atlanir.
+    return { discountTotal: 0, creditsUsed: 0 };
+  }
+
+  let creditsAvailable = credits;
+  let discountTotal = 0;
+  let creditsUsed = 0;
+
+  // En ucuz eslesen urunden baslanir — ayni hak sayisiyla musterinin
+  // avantaji maksimum indirimde degil, hak verimliliginde tutulur: her hak
+  // tek birim urunu bedavalarken once ucuz birimler bedavalanir (pahali
+  // birimler odemede kalir, toplam indirim minimize edilmez — isletme
+  // tarafinda guvenli yon).
+  const matchingUnits = items
+    .flatMap((item) => {
+      const matchesProduct = !!targetProductId && item.product.id === targetProductId;
+      const matchesCategory = !!targetCategory && item.product.category === targetCategory;
+      const matches = targetProductId ? matchesProduct : matchesCategory;
+
+      return matches
+        ? Array.from({ length: item.quantity }, () => item.product.price)
+        : [];
+    })
+    .sort((a, b) => a - b);
+
+  for (const unitPrice of matchingUnits) {
+    if (creditsAvailable < 1) {
+      break;
+    }
+
+    discountTotal += unitPrice;
+    creditsUsed += 1;
+    creditsAvailable -= 1;
+  }
+
+  if (creditsUsed < 1) {
+    return { discountTotal: 0, creditsUsed: 0 };
+  }
+
+  // MP-2.15 deseni: hak dusme kosullu atomik — baska bir eszamanli siparis
+  // ayni haklari ikinci kez harcayamaz (guard sorguda).
+  const spentUser = await UserModel.findOneAndUpdate(
+    { _id: user._id, loyaltyRewardCredits: { $gte: creditsUsed } },
+    { $inc: { loyaltyRewardCredits: -creditsUsed } },
+    { new: true },
+  );
+
+  if (!spentUser) {
+    return { discountTotal: 0, creditsUsed: 0 };
+  }
+
+  user.loyaltyRewardCredits = spentUser.loyaltyRewardCredits;
+
+  return {
+    discountTotal: Number(discountTotal.toFixed(2)),
+    creditsUsed,
+    stampCampaignId: stampCampaign.id,
+    stampCampaignTitle: stampCampaign.title,
   };
 }
 

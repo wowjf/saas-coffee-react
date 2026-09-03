@@ -136,6 +136,11 @@ const UserSchema = new mongoose.Schema(
     },
     // MP-2.14: sadakat puani alt siniri — negatif puan new-save'lerde reddedilir.
     points: { type: Number, default: 0, min: [0, "Puan negatif olamaz"] },
+    // Damga (stamp_card) sadakati: secili damga kampanyasindaki ilerleme ve
+    // kazanilan ucretsiz urun haklari. Serializer bunlari ayiklar ve
+    // LoyaltySummary uzerinden (stampStatus/pointsRewardCredits) tasir.
+    loyaltyStampProgress: { type: Number, default: 0, min: 0 },
+    loyaltyRewardCredits: { type: Number, default: 0, min: 0 },
     avatar: { type: String, default: "" },
     favorites: [{ type: String }],
     addresses: [AddressSchema],

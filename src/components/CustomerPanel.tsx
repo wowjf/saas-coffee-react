@@ -4527,12 +4527,8 @@ export const CustomerPanel: React.FC<{ activeTab: string }> = ({ activeTab }) =>
                 </div>
               )}
 
-              {false && !isQrLoading && loyaltyQr && (
+              {!isQrLoading && loyaltyQr && loyaltyQr.summary.stampStatus && (
                 <>
-                  <div className="bg-surface p-4 rounded-3xl inline-block border border-border">
-                    <QRCodeSVG value={loyaltyQr.token} size={200} includeMargin />
-                  </div>
-
                   <div className="grid grid-cols-2 gap-3 text-left">
                     <div className="rounded-2xl border border-border bg-surface p-4">
                       <p className="text-[9px] font-bold uppercase tracking-[0.2em] text-text-secondary">Puan</p>
