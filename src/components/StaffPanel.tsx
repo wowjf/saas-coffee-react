@@ -2,8 +2,10 @@ import React, { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { useApp } from '../AppContext';
+import { SupportChat } from './SupportChat';
 import { LoyaltyScanResult, Order, Product, Category } from '../types';
-import { 
+import {
+  MessageCircle, 
   CheckCircle2, 
   Clock, 
   Coffee, 
@@ -108,6 +110,19 @@ export const StaffPanel: React.FC<{ activeTab: string }> = ({ activeTab }) => {
 
   // C1: garson çağrıları — canlı siparişler sekmesinde gösterilir
   const [waiterCalls, setWaiterCalls] = useState<any[]>([]);
+
+  // C4: canlı destek sohbeti
+  const [showSupportChat, setShowSupportChat] = useState(false);
+  const [supportChatPending, setSupportChatPending] = useState(0);
+
+  const fetchSupportChatPending = async () => {
+    try {
+      const rooms = await apiRequest<any[]>('/api/chat/rooms');
+      setSupportChatPending(Array.isArray(rooms) ? rooms.filter((r: any) => r.status === 'waiting').length : 0);
+    } catch {
+      // best-effort
+    }
+  };
   const [isLoadingCalls, setIsLoadingCalls] = useState(false);
 
   const fetchWaiterCalls = async () => {
@@ -167,7 +182,11 @@ export const StaffPanel: React.FC<{ activeTab: string }> = ({ activeTab }) => {
   useEffect(() => {
     if (activeTab === 'live') {
       fetchWaiterCalls();
-      const interval = setInterval(fetchWaiterCalls, 10000);
+      fetchSupportChatPending();
+      const interval = setInterval(() => {
+        fetchWaiterCalls();
+        fetchSupportChatPending();
+      }, 10000);
       return () => clearInterval(interval);
     }
   }, [activeTab]);
@@ -549,8 +568,26 @@ export const StaffPanel: React.FC<{ activeTab: string }> = ({ activeTab }) => {
             >
               <Scan size={18} />
             </button>
+            <button
+              onClick={() => setShowSupportChat(true)}
+              className="w-10 h-10 rounded-2xl bg-white border border-border flex items-center justify-center shadow-sm active:scale-95 transition-transform relative"
+              title="Destek Sohbetleri"
+            >
+              <MessageCircle size={18} />
+              {supportChatPending > 0 && (
+                <span className="absolute -top-1 -right-1 bg-amber-500 text-white text-[9px] font-bold w-4 h-4 rounded-full flex items-center justify-center">
+                  {supportChatPending}
+                </span>
+              )}
+            </button>
           </div>
         </div>
+
+        <AnimatePresence>
+          {showSupportChat && (
+            <SupportChat mode="staff" onClose={() => setShowSupportChat(false)} />
+          )}
+        </AnimatePresence>
 
         {/* C1: Garson Çağrıları */}
         {(waiterCalls.length > 0 || isLoadingCalls) && (

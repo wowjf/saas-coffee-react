@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useApp } from '../AppContext';
+import { SupportChat } from './SupportChat';
 import { Address, Campaign, LoyaltyQrPayload, PaymentMethod } from '../types';
 import { 
   Wallet, 
@@ -418,6 +419,9 @@ export const CustomerPanel: React.FC<{ activeTab: string }> = ({ activeTab }) =>
   const callSupportLine = () => {
     window.location.href = SUPPORT_PHONE_HREF;
   };
+
+  // C4: canlı destek sohbeti
+  const [showSupportChat, setShowSupportChat] = useState(false);
 
   useEffect(() => {
     if (activeTab === 'profile') {
@@ -2965,13 +2969,27 @@ export const CustomerPanel: React.FC<{ activeTab: string }> = ({ activeTab }) =>
               <p>• Sadakat puanları (KP) ve sipariş aşamalarınız anlık olarak hesabınıza yansıtılmaktadır.</p>
               <p>• Herhangi bir aksaklık veya destek talebinde yönetici destek hattına bağlanabilirsiniz.</p>
             </div>
-            <button
-              type="button"
-              onClick={callSupportLine}
-              className="w-full rounded-xl bg-black px-4 py-3 text-xs font-bold text-white hover:bg-zinc-800 transition-all cursor-pointer text-center"
-            >
-              Yönetici Destek Hattı
-            </button>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={callSupportLine}
+                className="rounded-xl border border-black px-4 py-3 text-xs font-bold text-black hover:bg-surface transition-all cursor-pointer text-center"
+              >
+                Telefonla Ara
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowSupportChat(true)}
+                className="rounded-xl bg-black px-4 py-3 text-xs font-bold text-white hover:bg-zinc-800 transition-all cursor-pointer text-center"
+              >
+                Canlı Destek
+              </button>
+            </div>
+            <AnimatePresence>
+              {showSupportChat && (
+                <SupportChat mode="customer" onClose={() => setShowSupportChat(false)} />
+              )}
+            </AnimatePresence>
           </div>
         </div>
       );
@@ -3970,13 +3988,22 @@ export const CustomerPanel: React.FC<{ activeTab: string }> = ({ activeTab }) =>
               <p>{t("sadakat-kampanyalari-ve-siparis-durumu-anlik-olarak-hesabiniza-islenir")}</p>
               <p>Destek ihtiyacı olduğunda doğrudan personel ile iletişime geçebilirsiniz.</p>
             </div>
-            <button
-              type="button"
-              onClick={callSupportLine}
-              className="w-full rounded-2xl bg-black px-4 py-3 text-sm font-semibold text-white transition-transform active:scale-[0.98]"
-            >
-              Yönetici Destek Hattı
-            </button>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={callSupportLine}
+                className="rounded-2xl border border-black px-4 py-3 text-sm font-semibold text-black transition-transform active:scale-[0.98]"
+              >
+                Telefonla Ara
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowSupportChat(true)}
+                className="rounded-2xl bg-black px-4 py-3 text-sm font-semibold text-white transition-transform active:scale-[0.98]"
+              >
+                Canlı Destek
+              </button>
+            </div>
           </div>
         </div>
       );
