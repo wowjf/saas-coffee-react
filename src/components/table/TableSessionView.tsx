@@ -15,6 +15,7 @@ import {
   Receipt
 } from "lucide-react";
 import { t } from "../../shared/system-texts";
+import { WaiterCallButton } from "../WaiterCallButton";
 
 export const TableSessionView: React.FC<{ activeTab?: string }> = ({ activeTab }) => {
   const {
@@ -231,6 +232,10 @@ export const TableSessionView: React.FC<{ activeTab?: string }> = ({ activeTab }
             <h1 className="text-2xl font-display font-bold">Masa {tableSession.tableNumber}</h1>
           </div>
           <div className="flex items-center gap-3">
+            <WaiterCallButton
+              tableNumber={tableSession.tableNumber}
+              tableSessionToken={tableSessionToken}
+            />
             <button 
               onClick={() => {
                 setLeaveStep("choice");

@@ -106,6 +106,31 @@ export const StaffPanel: React.FC<{ activeTab: string }> = ({ activeTab }) => {
   const [isSavingProfile, setIsSavingProfile] = useState(false);
   const [isSavingPassword, setIsSavingPassword] = useState(false);
 
+  // C1: garson çağrıları — canlı siparişler sekmesinde gösterilir
+  const [waiterCalls, setWaiterCalls] = useState<any[]>([]);
+  const [isLoadingCalls, setIsLoadingCalls] = useState(false);
+
+  const fetchWaiterCalls = async () => {
+    try {
+      setIsLoadingCalls(true);
+      const data = await apiRequest<any[]>('/api/waiter-calls');
+      setWaiterCalls(Array.isArray(data) ? data : []);
+    } catch {
+      // çağrı listesi alınamadıysa panel sessiz kalır (best-effort)
+    } finally {
+      setIsLoadingCalls(false);
+    }
+  };
+
+  const handleCallAction = async (callId: string, action: 'acknowledge' | 'complete') => {
+    try {
+      await apiRequest(`/api/waiter-calls/${callId}/${action}`, { method: 'POST' });
+      await fetchWaiterCalls();
+    } catch (err: any) {
+      alert(err.message || t("islem-basarisiz-oldu"));
+    }
+  };
+
   // Synchronize profile draft on user load
   useEffect(() => {
     if (user) {
@@ -137,6 +162,15 @@ export const StaffPanel: React.FC<{ activeTab: string }> = ({ activeTab }) => {
       if (showLoading) setLoadingTables(false);
     }
   };
+
+  // C1: canlı sekmedeyken garson çağrılarını periyodik tazele
+  useEffect(() => {
+    if (activeTab === 'live') {
+      fetchWaiterCalls();
+      const interval = setInterval(fetchWaiterCalls, 10000);
+      return () => clearInterval(interval);
+    }
+  }, [activeTab]);
 
   // Poll tables
   useEffect(() => {
@@ -517,6 +551,75 @@ export const StaffPanel: React.FC<{ activeTab: string }> = ({ activeTab }) => {
             </button>
           </div>
         </div>
+
+        {/* C1: Garson Çağrıları */}
+        {(waiterCalls.length > 0 || isLoadingCalls) && (
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <h2 className="text-xs font-bold uppercase tracking-widest text-text-secondary">Garson Çağrıları</h2>
+              {waiterCalls.length > 0 && (
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">
+                  {waiterCalls.length} aktif
+                </span>
+              )}
+            </div>
+            <div className="space-y-2">
+              {waiterCalls.map((call) => (
+                <div
+                  key={call.id}
+                  className={cn(
+                    "bg-white border rounded-2xl p-4 flex items-center justify-between gap-3 shadow-sm",
+                    call.priority === 'urgent' ? "border-red-200" : "border-amber-200"
+                  )}
+                >
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-sm font-bold text-black">Masa {call.tableNumber}</span>
+                      <span className={cn(
+                        "text-[9px] font-bold px-2 py-0.5 rounded-lg uppercase tracking-wider",
+                        call.type === 'bill' && "bg-blue-100 text-blue-700",
+                        call.type === 'help' && "bg-green-100 text-green-700",
+                        call.type === 'order' && "bg-purple-100 text-purple-700",
+                        call.type === 'complaint' && "bg-red-100 text-red-700",
+                        call.priority === 'urgent' && "bg-red-500 text-white"
+                      )}>
+                        {call.type === 'bill' ? 'Hesap' :
+                         call.type === 'help' ? t("yardim") :
+                         call.type === 'order' ? t("ek-siparis") :
+                         call.type === 'complaint' ? 'Şikayet' : call.type}
+                      </span>
+                      <span className="text-[10px] text-text-secondary">
+                        {call.userName} • {new Date(call.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      </span>
+                    </div>
+                    {call.message && (
+                      <p className="text-xs text-text-secondary mt-1 truncate">{call.message}</p>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    {call.status === 'pending' ? (
+                      <button
+                        onClick={() => handleCallAction(call.id, 'acknowledge')}
+                        className="px-3 py-2 rounded-xl bg-black text-white text-xs font-bold active:scale-95 transition-transform"
+                      >
+                        Al
+                      </button>
+                    ) : call.status === 'acknowledged' ? (
+                      <button
+                        onClick={() => handleCallAction(call.id, 'complete')}
+                        className="px-3 py-2 rounded-xl bg-green-600 text-white text-xs font-bold active:scale-95 transition-transform"
+                      >
+                        Bitir
+                      </button>
+                    ) : (
+                      <span className="text-[10px] font-bold text-green-600">{t("tamamlandi")}</span>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Search */}
         <div className="relative">
