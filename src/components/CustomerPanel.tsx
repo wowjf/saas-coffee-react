@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useApp } from '../AppContext';
 import { SupportChat } from './SupportChat';
+import { ReservationPanel } from './ReservationPanel';
 import { Address, Campaign, LoyaltyQrPayload, PaymentMethod } from '../types';
 import { 
   Wallet, 
@@ -422,6 +423,9 @@ export const CustomerPanel: React.FC<{ activeTab: string }> = ({ activeTab }) =>
 
   // C4: canlı destek sohbeti
   const [showSupportChat, setShowSupportChat] = useState(false);
+
+  // C5: rezervasyon görünümü
+  const [showReservations, setShowReservations] = useState(false);
 
   useEffect(() => {
     if (activeTab === 'profile') {
@@ -1808,6 +1812,23 @@ export const CustomerPanel: React.FC<{ activeTab: string }> = ({ activeTab }) =>
 
     content = (
       <div className="max-w-6xl mx-auto h-full p-4 sm:p-6 pb-32 md:pb-8 space-y-6">
+        {/* C5: Rezervasyon kartı */}
+        <div className="bg-white border border-border rounded-[28px] p-5 shadow-sm flex items-center justify-between gap-4">
+          <div>
+            <h3 className="text-sm font-bold text-black">Masa Rezervasyonu</h3>
+            <p className="text-xs text-text-secondary mt-0.5">Masanızı önceden ayırtın; onayı personelden gelir.</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowReservations(true)}
+            className="px-4 py-2.5 rounded-xl bg-black text-white text-xs font-bold active:scale-95 transition-transform shrink-0"
+          >
+            Rezervasyon Yap
+          </button>
+        </div>
+        {showReservations && (
+          <ReservationPanel />
+        )}
         {campaignSelectionError && (
           <motion.div 
             initial={{ opacity: 0, y: -8 }} 

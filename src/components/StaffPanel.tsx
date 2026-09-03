@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { useApp } from '../AppContext';
 import { SupportChat } from './SupportChat';
+import { StaffReservationPanel } from './ReservationPanel';
 import { LoyaltyScanResult, Order, Product, Category } from '../types';
 import {
   MessageCircle, 
@@ -113,6 +114,9 @@ export const StaffPanel: React.FC<{ activeTab: string }> = ({ activeTab }) => {
 
   // C4: canlı destek sohbeti
   const [showSupportChat, setShowSupportChat] = useState(false);
+
+  // C5: rezervasyon yönetimi (masa sekmesinde açılır)
+  const [showReservations, setShowReservations] = useState(false);
   const [supportChatPending, setSupportChatPending] = useState(0);
 
   const fetchSupportChatPending = async () => {
@@ -1088,14 +1092,28 @@ export const StaffPanel: React.FC<{ activeTab: string }> = ({ activeTab }) => {
             <h1 className="text-2xl font-display font-bold text-text-primary">Masa Takibi</h1>
             <p className="text-xs text-text-secondary">{t("masalarin-doluluk-siparis-ve-odeme-durumu")}</p>
           </div>
-          <button 
-            onClick={() => fetchTables(true)} 
-            disabled={loadingTables}
-            className="p-2 border border-border rounded-xl bg-white hover:bg-surface text-text-secondary shadow-sm transition-colors active:scale-95 flex items-center justify-center"
-          >
-            <RefreshCw size={16} className={cn(loadingTables && "animate-spin text-black")} />
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowReservations((prev) => !prev)}
+              className={cn(
+                "px-3 py-2 rounded-xl text-xs font-bold border transition-colors",
+                showReservations ? "bg-black text-white border-black" : "border-border bg-white hover:bg-surface text-black",
+              )}
+            >
+              Rezervasyonlar
+            </button>
+            <button 
+              onClick={() => fetchTables(true)} 
+              disabled={loadingTables}
+              className="p-2 border border-border rounded-xl bg-white hover:bg-surface text-text-secondary shadow-sm transition-colors active:scale-95 flex items-center justify-center"
+            >
+              <RefreshCw size={16} className={cn(loadingTables && "animate-spin text-black")} />
+            </button>
+          </div>
         </div>
+
+        {/* C5: rezervasyon yönetimi */}
+        {showReservations && <StaffReservationPanel />}
 
         {/* Stats row */}
         <div className="grid grid-cols-3 gap-3">
