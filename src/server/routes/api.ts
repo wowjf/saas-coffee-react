@@ -472,11 +472,15 @@ async function createCustomerOrderNotification(
     },
   };
 
-  if (orderId) {
-    void sendPushToOrder(orderId, pushPayload, userId);
-  } else if (userId) {
-    void sendPushToUser(userId, pushPayload);
-  }
+  // Ateşle-unut push gönderimi: hatalar yakalanmazsa Node 15+ süreci
+  // öldürür (unhandled rejection) ve test teardown'ında Mongo bağlantısı
+  // kapandıktan sonra reddedilen promise vitest'i exit 1 yapar.
+  const dispatchPush = orderId
+    ? sendPushToOrder(orderId, pushPayload, userId)
+    : sendPushToUser(userId, pushPayload);
+  dispatchPush.catch(() => {
+    // Push gönderimi best-effort'tır; bildirim kaydı zaten oluştu.
+  });
 }
 
 async function createStaffOrderNotification(details?: { tableNumber?: string; orderId?: string; total?: number }) {
@@ -494,7 +498,7 @@ async function createStaffOrderNotification(details?: { tableNumber?: string; or
     timestamp: new Date(),
   });
 
-  void sendPushToRole(["staff", "manager"], {
+  sendPushToRole(["staff", "manager"], {
     title: "Bancho Cafe • Yeni Sipariş!",
     body: message,
     tag: `staff-order-${details?.orderId || Date.now()}`,
@@ -503,6 +507,8 @@ async function createStaffOrderNotification(details?: { tableNumber?: string; or
       orderId: details?.orderId,
       type: "staff_new_order",
     },
+  }).catch(() => {
+    // Best-effort push; bildirim kaydı zaten oluştu.
   });
 }
 
