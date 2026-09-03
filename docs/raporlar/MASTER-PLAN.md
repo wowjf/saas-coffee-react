@@ -46,6 +46,25 @@
 >   fiziksel teslimat olmadığından bilgisel bayrak olarak kaldı).
 > - İndirim zinciri nihai sırası: damga hakkı → puan kampanyası → kupon → abonelik
 >   (her adım öncekinden kalan tutar üzerinde, hiçbir indirim aynı birime binmez).
+>
+> **Güncelleme (2026-09-03, üçüncü oturum — arayüz boşlukları kapatıldı):**
+> İkinci oturumun denetiminde arayüzü hiç olmayan çalışan backend modülleri tespit
+> edildi; C2 (abonelik arayüzü) kullanıcı kararıyla kapsam dışı bırakıldı, kalanlar
+> tamamlandı ve hepsi ayrı commit'lerle gönderildi:
+> - **C1 Garson çağrısı (3d3e9b9):** yetim kalan WaiterCallButton masa görünümüne
+>   bağlandı; StaffPanel canlı sekmesinde aktif çağrı listesi + Al/Bitir.
+> - **C3 Envanter (8d61875):** CMS altında malzeme yönetimi — liste, yeni malzeme,
+>   stok girişi; A2 otomatik düşümü panelden yönetilebilir hale geldi.
+> - **C4 Canlı destek (5d645d2):** SupportChat bileşeni; müşteri profili +
+>   personel canlı sekmesi, oda listesi/yanıtlama/kapatma, bekleyen rozeti.
+> - **C5 Rezervasyon (dfb9db6):** müşteri talep formu + kendi rezervasyonları;
+>   personel onay/red/tamamlandı/gelmedi yönetimi.
+> - **C6 Arkadaşlık + hediye (fe48191):** e-posta ile arkadaşlık akışı, bakiye
+>   hediyesi gönder/kabul et; profil altında tam ekran. AppContext'e
+>   syncAfterMutation expose edildi.
+> - **C7+D1+D2 (d320090):** /notifications/read-all + 'Tümünü Okundu İşaretle';
+>   vipThreshold → LoyaltySummary.isVip gerçek hesabı; Notification enum'una
+>   inventory_low_stock (stok uyarıları personel listesine düşer).
 
 
 Proje fonksiyonel olarak zengin ve büyük ölçüde çalışır durumda: `tsc --noEmit` temiz, **106/106 test geçiyor** (QA sayesinde), bcrypt + JWT + helmet + TLS 1.2/1.3 + atomik bakiye guard'ları gibi sağlam temeller var. Ancak **canlıya alınmayı engelleyen 9 madde** var: 4 kritik güvenlik açığı (kendi kendine para basma, e-postayla rol yükseltme, git geçmişinde TLS anahtarı, hediye/abonelik yarış koşulu), Express 4'te yakalanmayan async hatalardan kaynaklanan **sunucu çökme/askıda kalma** riski (QA'nın testle belgelediği DEF-1), tek kullanıcıda bile ~10 dakikada tetiklenen **429 rate-limit/polling çakışması** ve varsayılan yönetici şifresi.
