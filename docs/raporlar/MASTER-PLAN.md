@@ -17,6 +17,7 @@
 | **[BE]** | Backend Kalite Denetim Raporu (P0:4, P1:7, P2:9, P3:5) | `orch-backend-quality/backend-raporu.md` → `/home/yusuf/orca/workspaces/bancho-cafe/orch-backend-quality/backend-raporu.md` |
 | **[FE]** | Frontend Mimari Denetim Raporu (14 maddelik yol haritası) | `/home/yusuf/Belgeler/Projeler/orch-frontend-arch/frontend-raporu.md` |
 | **[QA]** | Test & QA Raporu (20→106 test, 1 defekt) | `orch-qa-tests/qa-raporu.md` → `/home/yusuf/orca/workspaces/bancho-cafe/orch-qa-tests/qa-raporu.md` |
+| **[SIM]** | Sızma Simülasyonu Güvenlik Raporu (dinamik denetim; 7 KRİTİK, 12 ORTA, 3 DÜŞÜK — kritiklerin 5'i koordinatörce yeniden üretilerek doğrulandı) | `docs/raporlar/guvenlik-simulasyon-raporu.md` |
 
 > Not: Görev tanımında raporların `/home/yusuf/Belgeler/Projeler/orch-*/` altında olması bekleniyordu; pratikte yalnızca frontend raporu orada, diğerleri ilgili orca worktree köklerinde yazılmış (backend raporu bunu kendi §9'unda belgeliyor).
 
@@ -143,6 +144,15 @@ Bunun altında iki büyük yapısal tema yatıyor: (1) **iş mantığının rout
 - **Yapılacak (Adım 1, SSE'siz):** (1) `/bootstrap`'ı böl: statik katalog `GET /catalog` (`Cache-Control`/ETag) + dinamik durum `GET /me/state`. (2) Manager bootstrap'ından `users`/`balanceTopUps`'ı çıkar → ayrı paginated endpoint'ler. (3) Bootstrap/state endpoint'lerini ayrı limit grubuna al (ör. 3000/15 dk). (4) İstemcide polling aralığını rol bazlı ayarla (customer 15-30 sn; mutasyon sonrası `syncAfterMutation` deseni korunarak) [FE #2'nin interval kısmı].
 - **Kabul:** Masa modunda 30 dk kesintisiz kullanımda 429 yok; manager açıkken bootstrap payload'ında kullanıcı listesi yok.
 
+### MP-0.10 — Simülasyon denetimi kritikleri (dinamik sızma bulguları)
+- **Kaynak:** [SIM — hepsi çalışan sistemde kanıtlandı] · Rapor: `docs/raporlar/guvenlik-simulasyon-raporu.md`
+- **S-K1 (en acil):** Sadakat QR token'ı `JWT_SECRET` ile imzalanıyor (`services/loyalty.ts:28`) ve `attachAuth` `purpose` claim'ini kontrol etmiyor → kurbanın QR'ını gören herkes hesabı ele geçirip bakiyesini çalabilir (şifre değiştirme + hediye hırsızlığı uçtan uca kanıtlandı). Düzeltme: purpose reddi + ayrı `LOYALTY_JWT_SECRET`.
+- **S-K4:** Bakiye yükleme read-modify-write (`api.ts:1583`) — 5 paralel yüklemede ₺100 buharlaşıyor (koordinatörce yeniden üretildi). Düzeltme: `$inc`.
+- **S-K5:** `POST /users/me/balance` staff'a açık — staff kendine sınırsız para basıp hediyeyle çıkarabiliyor (yeniden üretildi). Düzeltme: `restrictTo("manager")` + onay akışı.
+- **S-K2:** Ödenmiş masa siparişi reddedilince iade yok (para kayboluyor). **S-K6:** paralel `pay`/`leave` çift kesim. **S-K7:** abonelik yarışında iadesiz kesim. **S-K3:** no-pay "yemek-kaçağı" döngüsü (ürün + sadakat puanı bedava).
+- **Yapılacak:** Yukarıdaki sırayla (etki/maliyet) düzelt; her biri için sim ortamında (`scripts/sim-server.ts`) yarış senaryosunu regression testine çevir.
+- **Kabul:** Sim sunucusunda aynı saldırı scriptleri tümünü reddediyor; kritik yarış senaryoları CI testlerinde.
+
 ---
 
 ## 2. P1 — İlk Hafta
@@ -264,6 +274,7 @@ Bunun altında iki büyük yapısal tema yatıyor: (1) **iş mantığının rout
 #### MP-2.15 — Refund/kampanya güncellemelerinde atomik update
 - **Kaynak:** [BE P2-5, §4 tablosu] · Konum: `PATCH /orders/:id/status` iade `user.save()`, kampanya `remainingUses` `user.save()` (non-atomik, lost-update)
 - **Yapılacak:** `save()` yerine koşullu `$inc`/`findOneAndUpdate`; MP-2.9 servis çıkarma sırasında uygulanır.
+- **DURUM GÜNCELLEMESI (03.09, [SIM]):** Sipariş iadesi/hediye/kupon/sadakat uçları atomik guarda geçirildi ve dinamik saldırıları reddediyor. Ancak **dışında kalan üç uç aynı sınıf açığı taşıyor**: bakiye yükleme (`save()` — paralel yüklemelerde para kaybı/bedava ürün, S-K4), abonelik (check-then-act + unique-index 500'ünde iadesiz kesim, S-K7), masa `pay`/`leave` (paralel çift kesim, S-K6). Bu madde bu üç uca taşınmadan kapanmış sayılmaz → **MP-0.10**.
 
 ### Frontend yapısal borç
 
