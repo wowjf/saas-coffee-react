@@ -4,6 +4,14 @@ import type { Campaign } from "../types";
 export const LOYALTY_POINTS_PER_COMPLETED_ITEM = 100;
 export const LOYALTY_QR_TOKEN_TTL_SECONDS = 180;
 
+// Madde 13: 1 KP'nin TL karşılığı — tüm KP↔TL gösterimlerinde tek kaynak.
+// Sunucu tarafındaki karşılığı src/server/services/loyalty.ts taşır.
+export const KP_TL_VALUE = 0.1;
+
+export function formatKpAsTl(kp: number) {
+  return `${(Math.max(0, kp) * KP_TL_VALUE).toFixed(2).replace(".", ",")} ₺`;
+}
+
 export const POINT_REWARD_CAMPAIGN_TYPES = [
   "points_free_product",
   "points_discount_product",

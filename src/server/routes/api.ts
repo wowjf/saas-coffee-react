@@ -3,7 +3,16 @@ import mongoose from "mongoose";
 import { randomUUID } from "node:crypto";
 import jwt from "jsonwebtoken";
 import multer from "multer";
-import { attachAuth, attachOptionalAuth, restrictTo, type AuthRequest } from "../middleware/auth";
+import {
+  attachAuth,
+  attachOptionalAuth,
+  getEffectiveRole,
+  fetchStaffRole,
+  isValidStaffRole,
+  restrictTo,
+  restrictToManagerOrStaffRole,
+  type AuthRequest,
+} from "../middleware/auth";
 import { autoAsyncHandlers } from "../middleware/asyncHandler";
 import { redeemCouponForOrder, refundCouponUsage } from "../services/coupon";
 import { ApiError } from "../middleware/errorHandler";
@@ -16,8 +25,9 @@ import IngredientModel from "../models/Ingredient";
 import CategoryModel from "../models/Category";
 import ChangeLogModel from "../models/ChangeLog";
 import StaffModel from "../models/Staff";
+import ShiftModel from "../models/Shift";
 import BalanceTopUpModel from "../models/BalanceTopUp";
-import { normalizeEmail, serializeDocument, toIsoString, sanitizePlainText } from "../utils";
+import { normalizeEmail, serializeDocument, toIsoString, sanitizePlainText, resolveStationMapForOrders } from "../utils";
 import TableModel from "../models/Table";
 import TableSessionModel from "../models/TableSession";
 import ReviewModel from "../models/Review";
@@ -86,8 +96,16 @@ const imageUpload = multer({
 
 // MP-2.1: token iptal versiyonu — payload'a gomulur; kullanici dokumanindaki
 // tokenVersion arttiginda eski token'lar 401 alir (tum oturumlar duser).
-function signToken(userId: string, tokenVersion: number) {
-  return jwt.sign({ userId, tokenVersion }, process.env.JWT_SECRET!, {
+// staffRole claim'i her DB okumada ünvan çözmeye gerek bırakmaz; eski
+// (claim'siz) token'lar için auth middleware'i DB'ye düşer (fallback).
+function signToken(userId: string, tokenVersion: number, staffRole?: string) {
+  const payload: Record<string, unknown> = { userId, tokenVersion };
+
+  if (staffRole) {
+    payload.staffRole = staffRole;
+  }
+
+  return jwt.sign(payload, process.env.JWT_SECRET!, {
     expiresIn: "7d",
   });
 }
@@ -131,6 +149,25 @@ function serializeOrder(order: any) {
   return {
     ...rest,
     timestamp: toIsoString(rest.timestamp as Date | string),
+  };
+}
+
+// Vardiya serializer — tarih alanları ISO string'e taşınır (kural 7).
+function serializeShift(shift: any) {
+  const raw = serializeDocument(shift!) as Record<string, any>;
+  const endRequest = raw.endRequest as { requestedAt?: Date | string } | null | undefined;
+
+  return {
+    ...raw,
+    startedAt: toIsoString(raw.startedAt as Date | string),
+    endedAt: toIsoString(raw.endedAt as Date | string),
+    reviewedAt: toIsoString(raw.reviewedAt as Date | string),
+    endRequest: endRequest
+      ? {
+          ...endRequest,
+          requestedAt: toIsoString(endRequest.requestedAt as Date | string),
+        }
+      : null,
   };
 }
 
@@ -381,22 +418,10 @@ function getAccountRole(user: any): UserRole {
   return (user?.role || "customer") as UserRole;
 }
 
-function getEffectiveRole(user: any): UserRole {
-  const accountRole = getAccountRole(user);
-
-  if (accountRole === "customer") {
-    return "customer";
-  }
-
-  if (accountRole === "manager") {
-    if (user?.sessionRole === "manager" || user?.sessionRole === "staff") {
-      return user.sessionRole;
-    }
-    return "customer";
-  }
-
-  return user?.sessionRole === accountRole ? accountRole : "customer";
-}
+// getEffectiveRole artık middleware/auth.ts'ten import edilir (eski yerel
+// kopya çift bakım hatasına yol açıyordu). Yeni kural: personel/müdür
+// hesapları müşteri oturumuna inemez — staff her koşulda staff etkisi
+// görür, manager yalnız manager|staff'a inebilir.
 
 function isShiftRole(role: UserRole) {
   return role === "staff" || role === "manager";
@@ -587,6 +612,8 @@ async function buildBootstrapPayload(user: any) {
   const payload: Record<string, unknown> = {
     user: serializeUser(user),
     role: effectiveRole,
+    activeShift: null,
+    staffRole: "",
     products: products.map((item) => serializeSimpleDocument(item)),
     campaigns: campaigns.map((item) => serializeSimpleDocument(item)),
     categories: categories.map((item) => serializeSimpleDocument(item)),
@@ -619,13 +646,23 @@ async function buildBootstrapPayload(user: any) {
   payload.notifications = notifications.map((item) => serializeNotification(item));
 
   if (effectiveRole === "manager" || effectiveRole === "staff") {
-    const [ingredients, staff] = await Promise.all([
+    // Ünvanın kalıcı kaynağı Staff koleksiyonudur (User şeması taşımaz).
+    const [ingredients, staff, activeShift, staffRole] = await Promise.all([
       IngredientModel.find().sort({ name: 1 }),
       StaffModel.find().sort({ createdAt: -1 }),
+      // Vardiya durumu: personelin aktif/talepli en güncel vardiyası. Yoksa
+      // null döner — istemci (AppContext) vardiya kapısını bundan türetir.
+      ShiftModel.findOne({
+        staffUserId: user._id.toString(),
+        status: { $in: ["active", "end_requested"] },
+      }).sort({ startedAt: -1 }),
+      fetchStaffRole(user),
     ]);
 
     payload.ingredients = ingredients.map((item) => serializeSimpleDocument(item));
     payload.staff = staff.map((item) => serializeSimpleDocument(item));
+    payload.activeShift = activeShift ? serializeShift(activeShift) : null;
+    payload.staffRole = staffRole;
   }
 
   if (effectiveRole === "manager") {
@@ -911,7 +948,7 @@ router.post("/auth/register", async (req, res, next) => {
     });
 
     return res.status(201).json({
-      token: signToken(user._id.toString(), user.tokenVersion ?? 0),
+      token: signToken(user._id.toString(), user.tokenVersion ?? 0, await fetchStaffRole(user)),
       user: serializeUser(user),
     });
   } catch (error) {
@@ -1001,7 +1038,7 @@ router.post("/auth/login", async (req, res, next) => {
     await syncShiftStatusForUser(user, "İzinli");
 
     return res.json({
-      token: signToken(user._id.toString(), user.tokenVersion ?? 0),
+      token: signToken(user._id.toString(), user.tokenVersion ?? 0, await fetchStaffRole(user)),
       user: serializeUser(user),
     });
   } catch (error) {
@@ -1035,10 +1072,17 @@ router.post("/auth/session-role", attachAuth, async (req, res) => {
     return res.json({ user: serializeUser(req.authUser), role: "customer" });
   }
 
+  // Vardiya sistemiyle birlikte personel/müdür hesapları müşteri moduna
+  // inemez — arayüzdeki "Müşteri olarak devam et" çıkışı personel hesabı
+  // için backend'de de reddedilir.
+  if (nextRole === "customer") {
+    return res.status(403).json({ message: await getSystemText("personel-musteri-olarak-devam-edemez") });
+  }
+
   const allowedRoles: UserRole[] =
     accountRole === "manager"
-      ? ["manager", "staff", "customer"]
-      : [accountRole, "customer"];
+      ? ["manager", "staff"]
+      : [accountRole];
 
   if (!allowedRoles.includes(nextRole)) {
     return res.status(400).json({ message: await getSystemText("gecerli-bir-oturum-secimi-yapin") });
@@ -1046,7 +1090,6 @@ router.post("/auth/session-role", attachAuth, async (req, res) => {
 
   req.authUser.sessionRole = nextRole;
   await req.authUser.save();
-  await syncShiftStatusForUser(req.authUser, isShiftRole(nextRole) ? "Vardiyada" : "İzinli");
 
   return res.json({
     user: serializeUser(req.authUser),
@@ -1566,17 +1609,27 @@ router.post("/users/me/password", attachAuth, async (req, res, next) => {
 // S-K5 (MP-0.10): staff da kendi hesabina yukleyemez — personel kasada
 // musteriye yuklerken "/:id/balance" ucunu kullanir; self top-up karşılıksız
 // para basma kapısıydı.
-router.post("/users/me/balance", attachAuth, restrictTo("manager"), async (req, res) => {
+// Demo modu: musteri tarafi bakiye yukleme tum roller icin acik. Odeme
+// saglayici entegrasyonu gelene kadar bu uc "demo yukleme" olarak calisir —
+// ciro/bonus hala sunucu tarafinda hesaplanir (MP-0.1 korumasi surer),
+// ust tutar siniri kaldirilmistir.
+router.post("/users/me/balance", attachAuth, async (req, res) => {
   if (!req.authUser) {
     return res.status(401).json({ message: await getSystemText("oturum-gerekli") });
+  }
+
+  // Demo modu yalnızca geliştirme ortamında tüm rollere açıktır (ödeme
+  // sağlayıcı entegrasyonu gelene kadar). Üretimde S-K5 kısıtı geçerlidir:
+  // self top-up yalnız manager. Test ortamı (vitest) üretim gibi davranır.
+  if (process.env.NODE_ENV === "production" || process.env.NODE_ENV === "test" || !process.env.NODE_ENV) {
+    if (req.authRole !== "manager") {
+      return res.status(403).json({ message: await getSystemText("bu-islem-icin-yetkiniz-yok") });
+    }
   }
 
   const creditedAmount = ensureNumber(req.body.amount);
   if (creditedAmount <= 0) {
     return res.status(400).json({ message: await getSystemText("yuklenecek-miktar-sifirdan-buyuk-olmalidir") });
-  }
-  if (creditedAmount > 10000) {
-    return res.status(400).json({ message: await getSystemText("tek-seferde-en-fazla-10-000-yuklenebilir") });
   }
 
   // revenueAmount/bonusAmount istemciden ASLA kabul edilmez (MP-0.1): sunucu
@@ -2363,6 +2416,194 @@ router.get("/staff", attachAuth, restrictTo("staff", "manager"), async (_req, re
   res.json(staff.map((item) => serializeSimpleDocument(item)));
 });
 
+// ============================================================
+// Vardiya sistemi: personel vardiyası Shift koleksiyonuyla yönetilir.
+// MVP kapsamı görünürlük + onay akışıdır; operasyonel kilitleme yok
+// (bilinçli karar — arayüz kilidi istemci tarafında uygulanır).
+// ============================================================
+
+const SHIFT_END_REASONS = ["vardiya_bitti", "mola", "acil_durum", "diger"] as const;
+type ShiftEndReason = (typeof SHIFT_END_REASONS)[number];
+
+// Vardiya başlat: aktif/talepli vardiyası varsa 409.
+router.post("/shifts/start", attachAuth, restrictTo("staff", "manager"), async (req: AuthRequest, res) => {
+  if (!req.authUser) {
+    return res.status(401).json({ message: await getSystemText("oturum-gerekli") });
+  }
+
+  const userId = req.authUser._id.toString();
+
+  const existing = await ShiftModel.findOne({
+    staffUserId: userId,
+    status: { $in: ["active", "end_requested"] },
+  });
+
+  if (existing) {
+    return res.status(409).json({ message: await getSystemText("vardiya-zaten-aktif") });
+  }
+
+  const shift = await ShiftModel.create({
+    staffUserId: userId,
+    staffEmail: normalizeEmail(String(req.authUser.email || "")),
+    staffName: `${String(req.authUser.name || "").trim()} ${String(req.authUser.surname || "").trim()}`.trim(),
+    staffRole: req.authStaffRole || "",
+    startedAt: new Date(),
+    endedAt: null,
+    status: "active",
+    endRequest: null,
+  });
+
+  return res.status(201).json(serializeShift(shift));
+});
+
+// Vardiya bitirme talebi: kendi aktif vardiyasına endRequest yazar.
+router.post("/shifts/end-request", attachAuth, restrictTo("staff", "manager"), async (req: AuthRequest, res) => {
+  if (!req.authUser) {
+    return res.status(401).json({ message: await getSystemText("oturum-gerekli") });
+  }
+
+  const reason = String(req.body?.reason || "");
+  const customNote = sanitizePlainText(String(req.body?.customNote || "")).slice(0, 300);
+
+  if (!SHIFT_END_REASONS.includes(reason as ShiftEndReason)) {
+    return res.status(400).json({ message: await getSystemText("gecerli-bir-oturum-secimi-yapin") });
+  }
+
+  if (reason === "diger" && !customNote.trim()) {
+    return res.status(400).json({ message: await getSystemText("eksik-bilgi") });
+  }
+
+  const shift = await ShiftModel.findOneAndUpdate(
+    {
+      staffUserId: req.authUser._id.toString(),
+      status: "active",
+    },
+    {
+      $set: {
+        status: "end_requested",
+        endRequest: {
+          requestedAt: new Date(),
+          reason,
+          customNote,
+        },
+      },
+    },
+    { new: true },
+  );
+
+  if (!shift) {
+    return res.status(404).json({ message: await getSystemText("aktif-vardiya-bulunamadi") });
+  }
+
+  // Talep müdür/yönetici kanallarına anlık düşsün (SSE).
+  publishToManagers("shift_end_requested", {
+    shiftId: shift._id.toString(),
+    staffUserId: shift.staffUserId,
+    staffName: shift.staffName,
+    staffRole: shift.staffRole,
+    reason,
+  });
+
+  return res.json(serializeShift(shift));
+});
+
+// Personel kendi geçmişi (son 30 kayıt, tarih sıralı).
+router.get("/shifts/my", attachAuth, restrictTo("staff", "manager"), async (req: AuthRequest, res) => {
+  if (!req.authUser) {
+    return res.status(401).json({ message: await getSystemText("oturum-gerekli") });
+  }
+
+  const shifts = await ShiftModel.find({ staffUserId: req.authUser._id.toString() })
+    .sort({ startedAt: -1 })
+    .limit(30);
+
+  res.json(shifts.map((item) => serializeShift(item)));
+});
+
+// Aktif + talepli vardiyalar. staffRole="mudur" ünvanlı personel VEYA
+// manager hesap tümünü görür; diğer personel yalnız kendi kaydını görür.
+router.get("/shifts/active", attachAuth, restrictTo("staff", "manager"), async (req: AuthRequest, res) => {
+  if (!req.authUser) {
+    return res.status(401).json({ message: await getSystemText("oturum-gerekli") });
+  }
+
+  const seesAll = req.authRole === "manager" || req.authStaffRole === "mudur";
+  const query = seesAll
+    ? { status: { $in: ["active", "end_requested"] } }
+    : {
+        status: { $in: ["active", "end_requested"] },
+        staffUserId: req.authUser._id.toString(),
+      };
+
+  const shifts = await ShiftModel.find(query).sort({ startedAt: -1 });
+  res.json(shifts.map((item) => serializeShift(item)));
+});
+
+// Bitirme talebi incelemesi: yalnız manager hesap VEYA staffRole="mudur".
+// approve → completed + endedAt; reject → talep düşer, vardiya sürer (active).
+router.patch(
+  "/shifts/:id/review",
+  attachAuth,
+  restrictToManagerOrStaffRole("mudur"),
+  async (req: AuthRequest, res) => {
+    if (!req.authUser) {
+      return res.status(401).json({ message: await getSystemText("oturum-gerekli") });
+    }
+
+    const approve = req.body?.approve === true;
+    const reject = req.body?.approve === false;
+    if (!approve && !reject) {
+      return res.status(400).json({ message: await getSystemText("eksik-bilgi") });
+    }
+
+    const reviewNote = sanitizePlainText(String(req.body?.reviewNote || "")).slice(0, 300);
+    const reviewerId = req.authUser._id.toString();
+    const reviewerName = `${String(req.authUser.name || "").trim()} ${String(req.authUser.surname || "").trim()}`.trim();
+
+    const shift = await ShiftModel.findOne({ _id: req.params.id, status: "end_requested" });
+
+    if (!shift) {
+      return res.status(404).json({ message: await getSystemText("aktif-vardiya-bulunamadi") });
+    }
+
+    const now = new Date();
+    shift.status = approve ? "completed" : "active";
+    if (approve) {
+      shift.endedAt = now;
+    } else {
+      // Red: talep geri alınır, vardiya sürer.
+      shift.endRequest = null;
+    }
+    shift.reviewedByUserId = reviewerId;
+    shift.reviewedByName = reviewerName;
+    shift.reviewedAt = now;
+    shift.reviewNote = reviewNote;
+    await shift.save();
+
+    // Sonucu talep sahibine hem kalıcı bildirim hem SSE ile ilet.
+    const message = approve
+      ? await getSystemText("vardiya-talebi-onaylandi")
+      : await getSystemText("vardiya-talebi-reddedildi");
+
+    await NotificationModel.create({
+      userId: shift.staffUserId,
+      title: approve ? "Vardiya Tamamlandı" : "Vardiya Talebi Reddedildi",
+      message: reviewNote.trim() ? `${message} ${reviewNote.trim()}` : message,
+      type: approve ? "success" : "warning",
+      read: false,
+      timestamp: now,
+    });
+
+    publishToUser(shift.staffUserId, approve ? "shift_review_approved" : "shift_review_rejected", {
+      shiftId: shift._id.toString(),
+      approved: approve,
+      reviewNote,
+    });
+
+    return res.json(serializeShift(shift));
+  },
+);
+
 router.post("/staff", attachAuth, restrictTo("manager"), async (req, res, next) => {
   try {
     const name = String(req.body.name || "").trim();
@@ -2370,18 +2611,22 @@ router.post("/staff", attachAuth, restrictTo("manager"), async (req, res, next) 
     const email = normalizeEmail(String(req.body.email || ""));
     const role = String(req.body.role || "") as "staff" | "manager";
     const status = String(req.body.status || "İzinli") as "Vardiyada" | "İzinli";
+    // Personel ünvanı: garson/bar/mutfak/mudur; gönderilmezse "" (tanımsız).
+    const staffRole = String(req.body.staffRole || "");
 
     if (!name) return res.status(400).json({ message: await getSystemText("isim-zorunludur") });
     if (!surname) return res.status(400).json({ message: await getSystemText("soyisim-zorunludur") });
     if (!email) return res.status(400).json({ message: await getSystemText("e-posta-zorunludur") });
     if (!["staff", "manager"].includes(role)) return res.status(400).json({ message: await getSystemText("gecersiz-rol") });
     if (!["Vardiyada", "İzinli"].includes(status)) return res.status(400).json({ message: await getSystemText("gecersiz-durum") });
+    if (!isValidStaffRole(staffRole)) return res.status(400).json({ message: await getSystemText("gecersiz-personel-rolu") });
 
     const staff = await StaffModel.create({
       name,
       surname,
       email,
       role,
+      staffRole,
       status,
     });
 
@@ -2400,9 +2645,15 @@ router.patch("/staff/:id", attachAuth, restrictTo("manager"), async (req, res, n
     }
 
     const nextRole = String(req.body.role || "") as "customer" | "staff" | "manager";
+    // Ünvan güncellemesi opsiyonel: body'de staffRole yoksa mevcut korunur.
+    const nextStaffRole = typeof req.body.staffRole === "string" ? req.body.staffRole : undefined;
 
     if (!["customer", "staff", "manager"].includes(nextRole)) {
       return res.status(400).json({ message: await getSystemText("gecerli-bir-rol-secilmeli") });
+    }
+
+    if (nextStaffRole !== undefined && !isValidStaffRole(nextStaffRole)) {
+      return res.status(400).json({ message: await getSystemText("gecersiz-personel-rolu") });
     }
 
     const staff = await StaffModel.findById(req.params.id);
@@ -2430,8 +2681,19 @@ router.patch("/staff/:id", attachAuth, restrictTo("manager"), async (req, res, n
     }
 
     staff.role = nextRole;
+    if (nextStaffRole !== undefined) {
+      staff.staffRole = nextStaffRole;
+    }
     await staff.save();
-    await UserModel.updateOne({ email: staff.email }, { $set: { role: nextRole } });
+    // Ünvan yalnızca Staff koleksiyonunda tutulur; User şemasına yazılmaz
+    // (yeni token'lara login sırasında Staff'tan claim olarak taşınır).
+    await UserModel.updateOne({
+      email: staff.email,
+    }, {
+      $set: {
+        role: nextRole,
+      },
+    });
 
     return res.json(serializeSimpleDocument(staff));
   } catch (error) {
@@ -2475,6 +2737,48 @@ router.get("/orders", attachAuth, async (req, res) => {
 
   res.json(orders.map((item) => serializeOrder(item)));
 });
+
+// İstasyon görünümü (bar/mutfak): Bar/Mutfak ayrımı MVP'de İSTEMCİ
+// görünürlüğü + bu filtreyle sağlanır. Sipariş kalemlerinin kategori adları
+// utils'teki geçici sabit eşlemeyle istasyona çözümlenir; tüm kalemleri
+// "yok"a düşen siparişler (eşleşmeyen kategori) istasyon filtresinin dışında
+// kalır. PATCH /orders/:id/status kısıtlanmaz (bilinçli MVP kararı).
+router.get(
+  "/orders/station",
+  attachAuth,
+  restrictTo("staff", "manager"),
+  async (req: AuthRequest, res) => {
+    if (!req.authUser) {
+      return res.status(401).json({ message: await getSystemText("oturum-gerekli") });
+    }
+
+    const station = String(req.query.station || "");
+
+    if (station !== "bar" && station !== "mutfak") {
+      return res.status(400).json({ message: await getSystemText("gecersiz-parametreler") });
+    }
+
+    const orders = await OrderModel.find({
+      status: { $in: ["pending", "preparing", "ready"] },
+    }).sort({ timestamp: -1 });
+
+    const stationMap = await resolveStationMapForOrders(orders);
+
+    const filtered = orders.filter((order) => {
+      const stations = new Set(
+        (order.items || [])
+          .map((item: any) => stationMap[String(item?.product?.category || "").trim()])
+          .filter((value: unknown): value is "bar" | "mutfak" => value === "bar" || value === "mutfak"),
+      );
+      return stations.has(station as "bar" | "mutfak");
+    });
+
+    res.json({
+      station,
+      orders: filtered.map((item) => serializeOrder(item)),
+    });
+  },
+);
 
 router.post("/orders", attachAuth, async (req, res) => {
   if (!req.authUser) {
@@ -2614,6 +2918,23 @@ router.post("/orders", attachAuth, async (req, res) => {
   let orderUserId = req.authUser._id.toString();
   let orderUserName = `${req.authUser.name} ${req.authUser.surname}`.trim();
 
+  // Madde 1: aktif masa oturumu katılımcısı normal (token'sız) sipariş
+  // veremez — sipariş ancak kendi masa oturumu üzerinden açılabilir. Aksi
+  // halde kullanıcı farklı adresten girip masayı atlatıp ayrı sipariş basar.
+  if (!tableSessionToken) {
+    const activeSession = await TableSessionModel.findOne({
+      status: "open",
+      "participants.userId": req.authUser._id.toString(),
+    }).sort({ openedAt: -1 });
+    if (activeSession && req.authRole !== "staff" && req.authRole !== "manager") {
+      return res.status(403).json({
+        code: "ACTIVE_TABLE_SESSION",
+        tableNumber: activeSession.tableNumber,
+        message: `Aktif masa oturumunuz var (Masa ${activeSession.tableNumber}). Siparişinizi masa ekranından vermelisiniz.`,
+      });
+    }
+  }
+
   if (tableSessionToken) {
     const session = await TableSessionModel.findOne({ sessionToken: tableSessionToken, status: "open" });
     if (!session) {
@@ -2622,7 +2943,23 @@ router.post("/orders", attachAuth, async (req, res) => {
     const isStaffOrManager = req.authRole === "staff" || req.authRole === "manager";
     const isParticipant = session.participants.some((p) => p.userId === req.authUser._id.toString());
     if (!isParticipant && !isStaffOrManager) {
-      return res.status(403).json({ message: await getSystemText("bu-masa-oturumuna-katilim-izniniz-yok") });
+      return res.status(403).json({ code: "WRONG_TABLE_SESSION", message: await getSystemText("bu-masa-oturumuna-katilim-izniniz-yok") });
+    }
+    // Madde 1 (devam): katılımcı olsa bile kendi açık oturumu başka bir
+    // masadaysa sipariş yalnız kendi oturumundan verilebilir.
+    if (!isStaffOrManager) {
+      const myOtherOpenSession = await TableSessionModel.findOne({
+        status: "open",
+        "participants.userId": req.authUser._id.toString(),
+        sessionToken: { $ne: tableSessionToken },
+      }).sort({ openedAt: -1 });
+      if (myOtherOpenSession) {
+        return res.status(403).json({
+          code: "ACTIVE_TABLE_SESSION",
+          tableNumber: myOtherOpenSession.tableNumber,
+          message: `Aktif masa oturumunuz var (Masa ${myOtherOpenSession.tableNumber}). Siparişinizi kendi masa ekranınızdan vermelisiniz.`,
+        });
+      }
     }
     tableNumber = session.tableNumber;
 
@@ -3496,6 +3833,31 @@ router.get("/table-sessions/session/:token", attachAuth, async (req, res, next) 
   } catch (error) {
     console.error("get table session error:", error);
     return next(new ApiError(500, "TABLE_SESSION_FETCH_FAILED", "sys:masa-bilgileri-alinirken-hata-olustu"));
+  }
+});
+
+// Madde 1: kullanıcının açık masa oturumu var mı? İstemci bunu ana panelde
+// sorgulayıp /table/N'ye yönlendirmek için kullanır.
+router.get("/table-sessions/my-active", attachAuth, async (req, res, next) => {
+  try {
+    if (!req.authUser) {
+      return res.status(401).json({ message: await getSystemText("oturum-gerekli") });
+    }
+    const session = await TableSessionModel.findOne({
+      status: "open",
+      "participants.userId": req.authUser._id.toString(),
+    }).sort({ openedAt: -1 });
+    if (!session) {
+      return res.json({ active: false });
+    }
+    return res.json({
+      active: true,
+      tableNumber: session.tableNumber,
+      sessionToken: session.sessionToken,
+    });
+  } catch (error) {
+    console.error("my-active table session error:", error);
+    return next(new ApiError(500, "TABLE_ACTIVE_LOOKUP_FAILED", "sys:masa-oturumu-sorgulanirken-hata-olustu"));
   }
 });
 

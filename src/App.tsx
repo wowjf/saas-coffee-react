@@ -8,6 +8,7 @@ import { motion, AnimatePresence } from "motion/react";
 import { Smartphone, Users, Coffee, X, CheckCircle2, AlertCircle, Info, Gift, Utensils, ShoppingBag, Bell, User as UserIcon, ClipboardList, Search, LayoutDashboard, Settings } from "lucide-react";
 import { cn } from "./lib/utils";
 import { ApiRequestError } from "./lib/api";
+import { formatTurkeyPhoneInput, parseTurkeyPhone } from "./lib/phoneMask";
 import { t } from "./shared/system-texts";
 import { playChimeSound } from "./lib/pushClient";
 import { NotificationPermissionBanner } from "./components/NotificationPermissionBanner";
@@ -185,6 +186,67 @@ const Toast = () => {
   );
 };
 
+// Madde 15: doğrulanmamış müşteriye ilk girişte bir kez gösterilen kırmızı
+// bilgilendirme pop-up'ı. Profili Tamamla → profil sekmesi; Şimdilik Atla →
+// localStorage'a kullanıcı bazlı tek seferlik kapatma yazar.
+const VerificationPopup: React.FC<{
+  visible: boolean;
+  onDismiss: () => void;
+  onComplete: () => void;
+}> = ({ visible, onDismiss, onComplete }) => {
+  if (!visible) return null;
+
+  return (
+    <AnimatePresence>
+      <motion.div
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        exit={{ opacity: 0 }}
+        className="fixed inset-0 z-[240] flex items-center justify-center bg-black/50 px-5"
+        onClick={onDismiss}
+      >
+        <motion.div
+          initial={{ opacity: 0, y: 18, scale: 0.97 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          transition={{ type: "spring", damping: 26, stiffness: 340 }}
+          className="w-full max-w-sm rounded-[28px] bg-white p-6 shadow-[0_24px_80px_rgba(15,23,42,0.22)] border-2 border-red-500"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="flex items-start gap-3">
+            <div className="w-11 h-11 rounded-2xl bg-red-50 border border-red-100 flex items-center justify-center shrink-0">
+              <AlertCircle size={22} className="text-red-500" />
+            </div>
+            <div className="space-y-1 min-w-0">
+              <h2 className="text-lg font-display font-bold text-black leading-tight">Profilinizi Tamamlayın</h2>
+              <p className="text-xs text-text-secondary leading-relaxed">
+                Kampanyalardan ve KP sıralamasından yararlanabilmek için telefon, e-posta ve T.C. kimlik numaranızın
+                doğrulanması gerekir. Bu bilgileri paylaşmazsanız KP kazanamaz ve sıralamada listelenemezsiniz.
+              </p>
+            </div>
+          </div>
+
+          <div className="mt-5 space-y-2.5">
+            <button
+              type="button"
+              onClick={onComplete}
+              className="w-full py-3.5 rounded-2xl bg-red-500 hover:bg-red-600 text-white text-sm font-bold transition-transform active:scale-[0.98] cursor-pointer"
+            >
+              Profili Tamamla
+            </button>
+            <button
+              type="button"
+              onClick={onDismiss}
+              className="w-full py-3 rounded-2xl border border-border bg-surface text-text-secondary text-xs font-bold hover:text-black transition-colors cursor-pointer"
+            >
+              Şimdilik Atla
+            </button>
+          </div>
+        </motion.div>
+      </motion.div>
+    </AnimatePresence>
+  );
+};
+
 const RegistrationScreen = () => {
   const { updateUser } = useApp();
   const [phone, setPhone] = useState("");
@@ -192,13 +254,14 @@ const RegistrationScreen = () => {
   const [loading, setLoading] = useState(false);
 
   const handleComplete = async () => {
-    if (!phone || !birthDate) {
+    const phoneE164 = parseTurkeyPhone(phone);
+    if (!phoneE164 || !birthDate) {
       return;
     }
 
     setLoading(true);
     try {
-      await updateUser({ phone, birthDate });
+      await updateUser({ phone: phoneE164, birthDate });
       window.location.reload();
     } catch (error) {
       console.error("Registration error:", error);
@@ -228,9 +291,11 @@ const RegistrationScreen = () => {
           </label>
           <input
             type="tel"
-            placeholder="05xx xxx xx xx"
+            placeholder="+90 5-- --- -- --"
+            inputMode="numeric"
+            autoComplete="tel"
             value={phone}
-            onChange={(event) => setPhone(event.target.value)}
+            onChange={(event) => setPhone(formatTurkeyPhoneInput(event.target.value))}
             className="h-16 w-full rounded-2xl border border-border bg-white px-6 text-sm shadow-sm transition-all focus:border-black focus:outline-none"
           />
         </div>
@@ -288,6 +353,7 @@ const AppContent = () => {
   const [authError, setAuthError] = useState<InlineAuthError>(null);
   const [pendingSessionChoice, setPendingSessionChoice] = useState<"staff" | "manager" | null>(null);
   const [sessionChoiceLoading, setSessionChoiceLoading] = useState(false);
+  const [showVerificationPopup, setShowVerificationPopup] = useState(false);
 
   const customerTabs = [
     { id: "home", label: t("menu"), icon: Coffee },
@@ -321,6 +387,21 @@ const AppContent = () => {
     window.addEventListener("resize", handleResize);
     return () => window.removeEventListener("resize", handleResize);
   }, []);
+
+  // Madde 15: doğrulanmamış müşteriye ilk ana sayfa girişinde bir kez
+  // gösterilen bilgilendirme pop-up'ı. "Şimdilik Atla" kullanıcı başına
+  // kalıcıdır; profil tamamlandığında bir daha görünmez.
+  useEffect(() => {
+    if (!user || role !== "customer") {
+      setShowVerificationPopup(false);
+      return;
+    }
+    const v = user.identityVerification;
+    const isUnverified = !v?.phone || !v?.email || !v?.tckn;
+    const dismissedKey = `cafe_verification_dismissed_${user.id}`;
+    const wasDismissed = localStorage.getItem(dismissedKey) === "1";
+    setShowVerificationPopup(isUnverified && !wasDismissed);
+  }, [user, role]);
 
   useEffect(() => {
     if (role === "customer") {
@@ -395,14 +476,11 @@ const AppContent = () => {
       return;
     }
 
+    let registerPhoneE164 = "";
     if (isRegistering) {
-      const cleanPhone = registerPhone.replace(/\D/g, "");
-      const isValidTurkeyPhone =
-        (cleanPhone.length === 10 && cleanPhone.startsWith("5")) ||
-        (cleanPhone.length === 11 && cleanPhone.startsWith("05")) ||
-        (cleanPhone.length === 12 && cleanPhone.startsWith("905"));
-      if (!isValidTurkeyPhone) {
-        setAuthError({ field: "phone", message: t("gecerli-bir-turkiye-telefon-numarasi-giriniz-orn-05051234567") });
+      registerPhoneE164 = parseTurkeyPhone(registerPhone);
+      if (!registerPhoneE164) {
+        setAuthError({ field: "phone", message: "Telefon numarası +90 5-- --- -- -- biçiminde ve eksiksiz olmalıdır." });
         return;
       }
     }
@@ -440,7 +518,7 @@ const AppContent = () => {
           registerSurname.trim(),
           registerUsername.trim().toLowerCase().replace(/^@/, ''),
           registerGender as 'female' | 'male',
-          registerPhone.trim(),
+          registerPhoneE164,
           registerBirthDate.trim(),
           loginEmail,
           loginPassword
@@ -696,10 +774,12 @@ const AppContent = () => {
                         <div className="space-y-2">
                           <input
                             type="tel"
-                            placeholder={t("telefon-numarasi-orn-05051234567")}
+                            placeholder="+90 5-- --- -- --"
+                            inputMode="numeric"
+                            autoComplete="tel"
                             value={registerPhone}
                             onChange={(event) => {
-                              setRegisterPhone(event.target.value);
+                              setRegisterPhone(formatTurkeyPhoneInput(event.target.value));
                               clearAuthError("phone");
                             }}
                             className={cn(
@@ -1089,6 +1169,18 @@ const AppContent = () => {
           </div>
           <Toast />
         </main>
+        <VerificationPopup
+          visible={showVerificationPopup}
+          onDismiss={() => {
+            if (user) localStorage.setItem(`cafe_verification_dismissed_${user.id}`, "1");
+            setShowVerificationPopup(false);
+          }}
+          onComplete={() => {
+            if (user) localStorage.setItem(`cafe_verification_dismissed_${user.id}`, "1");
+            setShowVerificationPopup(false);
+            setActiveTab("profile");
+          }}
+        />
       </div>
     );
   }
@@ -1131,6 +1223,18 @@ const AppContent = () => {
       <Toast />
       <NotificationPermissionBanner />
       <div id="modal-root" className="absolute inset-0 pointer-events-none z-[100]" />
+      <VerificationPopup
+        visible={showVerificationPopup}
+        onDismiss={() => {
+          if (user) localStorage.setItem(`cafe_verification_dismissed_${user.id}`, "1");
+          setShowVerificationPopup(false);
+        }}
+        onComplete={() => {
+          if (user) localStorage.setItem(`cafe_verification_dismissed_${user.id}`, "1");
+          setShowVerificationPopup(false);
+          setActiveTab("profile");
+        }}
+      />
       <AnimatePresence>
         {user && pendingSessionChoice && (
           <motion.div

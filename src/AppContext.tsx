@@ -129,6 +129,20 @@ interface AdminOverviewPayload {
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
+// C8: bootstrap dilimleri içerik olarak aynıysa state referansı korunur.
+// SSE/ polling her olayda yeni dizi nesneleriyle geldiği için referans
+// eşitliği hiçbir zaman tutmaz; JSON.stringify kıyası bu boyutlarda ucuz
+// kalır ve gereksiz render'ları (canlı sipariş flicker'ı) keser.
+function setIfChanged<T>(setter: React.Dispatch<React.SetStateAction<T>>, next: T) {
+  setter((prev) => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
+}
+
+// C8: masa oturumu yanıtı için aynı derin-kıyas guard'ı — 3 sn'lik tazelemede
+// veri değişmediyse tablo bileşenleri yeniden render edilmez.
+function applyIfChanged<T>(setter: React.Dispatch<React.SetStateAction<T>>, next: T) {
+  setter((prev) => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
+}
+
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
   const [role, setRole] = useState<UserRole>("customer");
@@ -197,20 +211,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setUser(payload.user);
     const effectiveRole = payload.role || payload.user?.effectiveRole || payload.user?.role || "customer";
     setRole(effectiveRole);
-    setProducts(payload.products || []);
-    setOrders(payload.orders || []);
-    setServerNotifications(payload.notifications || []);
-    setCampaigns(payload.campaigns || []);
-    setIngredients(payload.ingredients || []);
+    // C8: her dilim yalnızca gerçekten değiştiyse yeni referansla set
+    // edilir — SSE/ polling kaynaklı flicker'ı kökten keser.
+    setIfChanged(setProducts, payload.products || []);
+    setIfChanged(setOrders, payload.orders || []);
+    setIfChanged(setServerNotifications, payload.notifications || []);
+    setIfChanged(setCampaigns, payload.campaigns || []);
+    setIfChanged(setIngredients, payload.ingredients || []);
     // MP-0.9: manager için bakiye geçmişi bootstrap'ta artık boş geliyor —
     // mevcut listeyi /api/admin/overview'dan gelen veriyi ezmeden korumak
     // için atlanır. Diğer roller kendi geçmişini bootstrap'tan almaya devam
     // eder (geriye uyumluluk).
     if (effectiveRole !== "manager") {
-      setBalanceTopUps(payload.balanceTopUps || []);
+      setIfChanged(setBalanceTopUps, payload.balanceTopUps || []);
     }
-    setCategories(payload.categories || []);
-    setStaff(payload.staff || []);
+    setIfChanged(setCategories, payload.categories || []);
+    setIfChanged(setStaff, payload.staff || []);
     // users / recentChanges manager için /api/admin/overview'dan gelir.
   }, []);
 
@@ -298,6 +314,37 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // gelir; EventSource header ekleyemediği için token sorgu parametresiyle
   // taşınır. Olay geldiğinde ilgili veri anında yenilenir; bağlantı koparsa
   // tarayıcı otomatik yeniden bağlanır (yukarıdaki polling yedektir).
+  // Madde 1: aktif masa oturumu olan müşteri ana paneldeyken (farklı
+  // cihaz/adres) otomatik olarak kendi masa ekranına yönlendirilir.
+  useEffect(() => {
+    if (!user || !token || role !== "customer") {
+      return;
+    }
+    if (window.location.pathname.match(/^\/(?:table|masa)(?:[-/])/)) {
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const result = await apiRequest<{ active: boolean; tableNumber?: string; sessionToken?: string }>(
+          "/api/table-sessions/my-active",
+        );
+        if (cancelled || !result.active || !result.tableNumber) {
+          return;
+        }
+        window.history.pushState({}, "", `/table/${result.tableNumber}/session/${result.sessionToken}`);
+        window.dispatchEvent(new PopStateEvent("popstate"));
+      } catch {
+        // Sorgu başarısızsa yönlendirme yapılmaz; kullanıcı normal devam eder.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // Yalnızca oturum açılırken/kapanırken tetiklenmeli.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id, token, role]);
+
   useEffect(() => {
     if (!user || !token) {
       return undefined;
@@ -312,6 +359,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     };
 
+    // C4: sohbet mesajı geldiğinde bootstrap'ın tamamını çekmek yerine
+    // (bootstrap sohbet verisi içermez) açık olan canlı destek penceresine
+    // ucuz bir window olayı yayınlanır; SupportChat kendi odasını tazeler.
+    const refreshChatOnEvent = () => {
+      window.dispatchEvent(new CustomEvent("cafe:chat-refresh"));
+    };
+
     // Sipariş durumu değişimleri: müşteri kendi siparişini, personel/yönetici
     // yeni sipariş akışını bu olaylarla alır.
     source.addEventListener("order_preparing", refreshOnEvent);
@@ -319,7 +373,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     source.addEventListener("order_cancelled", refreshOnEvent);
     source.addEventListener("staff_new_order", refreshOnEvent);
     source.addEventListener("waiter_call_new", refreshOnEvent);
-    source.addEventListener("chat_message", refreshOnEvent);
+    source.addEventListener("chat_message", refreshChatOnEvent);
 
     return () => {
       source.close();
@@ -427,14 +481,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     [],
   );
 
+  // C8: okundu işaretleme ucuz tutulur — PATCH idempotent olduğundan önce
+  // yerel state iyimser güncellenir; ağır tam bootstrap çekimi arka planda
+  // tetiklenir ama beklenmez (her tıklamada tüm panelin yeniden render
+  // edilmesini engeller).
   const markNotificationRead = useCallback(
     async (id: string) => {
+      setServerNotifications((prev) =>
+        prev.some((n) => n.id === id && !n.read)
+          ? prev.map((n) => (n.id === id ? { ...n, read: true } : n))
+          : prev,
+      );
       await apiRequest(`/api/notifications/${id}/read`, {
         method: "PATCH",
       });
-      await syncAfterMutation();
+      void refreshBootstrap();
     },
-    [syncAfterMutation],
+    [refreshBootstrap],
   );
 
   // C7: tüm bildirimleri okundu işaretle (kullanıcıya ait + rol hedefli).
@@ -482,10 +545,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     [syncAfterMutation],
   );
 
-  // Guvenlik (MP-0.1): /users/me/balance artik personel/yonetici uclarina
-  // ayrilmistir; ciro/bonus degerleri sunucu tarafinda hesaplanir ve istemciden
-  // gonderilmez. Mustteri tarafi yukleme akisi odeme entegrasyonu gelene kadar
-  // devre disidir (cagri 403 doner).
+  // Demo modu: /users/me/balance musteri tarafi demo yukleme ucudur; ciro/bonus
+  // degerleri sunucu tarafinda hesaplanir ve istemciden gonderilmez (MP-0.1).
   const updateBalance = useCallback(
     async (amount: number) => {
       await apiRequest("/api/users/me/balance", {
@@ -750,9 +811,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const response = await apiRequest<{ session: any; isHost: boolean; metrics: any; orders?: any[] }>(
         `/api/table-sessions/session/${tableSessionToken}`
       );
-      setTableSession(response.session);
-      setTableMetrics(response.metrics);
-      setTableOrders(response.orders || []);
+      // C8: 3 sn'lik tazelemede veri aynıysa yeni nesne atılmaz — masa
+      // görünümündeki sürekli yeniden render döngüsü kesilir.
+      applyIfChanged(setTableSession, response.session);
+      applyIfChanged(setTableMetrics, response.metrics);
+      applyIfChanged(setTableOrders, response.orders || []);
     } catch (error) {
       console.error("Failed to refresh table session, cleaning up local state:", error);
       setIsTableMode(false);

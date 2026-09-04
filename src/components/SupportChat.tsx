@@ -1,10 +1,12 @@
 // C4: canlı destek sohbeti — müşteri ve personel tarafının paylaştığı
-// bileşen. Müşteri modu kendi odasını açar (yoksa oluşur); personel modu
+// bileşen. Müşteri modu aktif odasını gösterir; oda yoksa boş durum +
+// 'Yeni Görüşme Başlat' (POST /api/chat/rooms) akışı sunar. Personel modu
 // oda listesinden seçip yanıtlar ve odayı kapatır. Canlılık SSE
-// (chat_message) + odanın kendisini periyodik yenileme ile sağlanır.
+// (chat_message → AppContext 'cafe:chat-refresh' window olayı) + SSE
+// yokluğunda 8 sn periyodik yenileme ile sağlanır.
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { MessageCircle, X, Send, CheckCheck, Clock } from 'lucide-react';
+import { MessageCircle, X, Send, CheckCheck, Clock, Headphones, AlertCircle, RefreshCw } from 'lucide-react';
 import { apiRequest } from '../lib/api';
 import { useApp } from '../AppContext';
 import { cn } from '../lib/utils';
@@ -46,34 +48,70 @@ export const SupportChat: React.FC<SupportChatProps> = ({ mode, onClose }) => {
   const [draft, setDraft] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+  // C4: yüklenme/ gönderme hataları artık yutulmaz — arayüzde gösterilir.
+  const [loadError, setLoadError] = useState('');
+  const [sendError, setSendError] = useState('');
+  const [isStarting, setIsStarting] = useState(false);
   const [view, setView] = useState<'list' | 'room'>(mode === 'customer' ? 'room' : 'list');
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   const fetchRooms = useCallback(async () => {
     try {
       if (mode === 'customer') {
-        const room = await apiRequest<ChatRoomData>('/api/chat/my');
+        // GET /chat/my artık yan etkisiz: aktif oda yoksa null döner.
+        const room = await apiRequest<ChatRoomData | null>('/api/chat/my');
         setRooms(room ? [room] : []);
         if (room) {
           setSelectedRoomId(room.id);
+        } else {
+          setSelectedRoomId(null);
         }
       } else {
         const data = await apiRequest<ChatRoomData[]>('/api/chat/rooms');
         setRooms(Array.isArray(data) ? data : []);
       }
-    } catch {
-      // sohbet yüklenemediyse boş kalır; kullanıcı yenileyebilir
+      setLoadError('');
+    } catch (err: any) {
+      // C4: hata state'e taşınır ve arayüzde kırmızı satır olarak görünür.
+      setLoadError(err?.message || t("sohbetler-yuklenirken-hata-olustu"));
     } finally {
       setIsLoading(false);
     }
   }, [mode]);
 
+  // C4: yeni destek odası açar (ilk mesaj opsiyonel). Aktif oda varsa
+  // sunucu mevcut odayı döndürür.
+  const startNewRoom = useCallback(async () => {
+    setIsStarting(true);
+    setSendError('');
+    try {
+      const room = await apiRequest<ChatRoomData>('/api/chat/rooms', {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      if (room) {
+        setRooms([room]);
+        setSelectedRoomId(room.id);
+        setView('room');
+      }
+    } catch (err: any) {
+      setSendError(err?.message || t("sohbet-yuklenirken-hata-olustu"));
+    } finally {
+      setIsStarting(false);
+    }
+  }, []);
+
   useEffect(() => {
     fetchRooms();
-    // SSE olayları AppContext'te genel refresh tetikler; burada odaları da
-    // tazelemek için hafif bir periyot kullanılır.
+    // C4: SSE chat_message olayı AppContext'te 'cafe:chat-refresh' window
+    // olayına çevrilir — personel yanıtı geldiğinde odalar sessizce ve
+    // anında tazelenir. SSE yoksa aşağıdaki 8 sn polling yedektir.
+    window.addEventListener('cafe:chat-refresh', fetchRooms as EventListener);
     const interval = setInterval(fetchRooms, 8000);
-    return () => clearInterval(interval);
+    return () => {
+      window.removeEventListener('cafe:chat-refresh', fetchRooms as EventListener);
+      clearInterval(interval);
+    };
   }, [fetchRooms]);
 
   const selectedRoom = rooms.find((r) => r.id === selectedRoomId) || null;
@@ -86,6 +124,7 @@ export const SupportChat: React.FC<SupportChatProps> = ({ mode, onClose }) => {
     const text = draft.trim();
     if (!text || !selectedRoomId || isSending) return;
     setIsSending(true);
+    setSendError('');
     try {
       await apiRequest(`/api/chat/${selectedRoomId}/message`, {
         method: 'POST',
@@ -94,7 +133,7 @@ export const SupportChat: React.FC<SupportChatProps> = ({ mode, onClose }) => {
       setDraft('');
       await fetchRooms();
     } catch (err: any) {
-      alert(err.message || t("mesaj-gonderilirken-hata-olustu"));
+      setSendError(err?.message || t("mesaj-gonderilirken-hata-olustu"));
     } finally {
       setIsSending(false);
     }
@@ -108,12 +147,17 @@ export const SupportChat: React.FC<SupportChatProps> = ({ mode, onClose }) => {
       setView('list');
       setSelectedRoomId(null);
     } catch (err: any) {
-      alert(err.message || t("sohbet-kapatilirken-hata-olustu"));
+      setSendError(err?.message || t("sohbet-kapatilirken-hata-olustu"));
     }
   };
 
   const openRooms = rooms.filter((r) => r.status !== 'resolved');
   const pendingCount = rooms.filter((r) => r.status === 'waiting').length;
+  // Müşteri görünümünde oda henüz hazır değilse (yok/oluşuyor) gönderme
+  // butonu devre dışı kalır ve gövdede 'Görüşme yükleniyor' gösterilir.
+  const customerRoomPending = mode === 'customer' && !selectedRoom;
+
+  const showError = sendError || (isLoading ? '' : loadError);
 
   return (
     <motion.div
@@ -159,6 +203,21 @@ export const SupportChat: React.FC<SupportChatProps> = ({ mode, onClose }) => {
             <X size={16} />
           </button>
         </div>
+
+        {/* C4: hata satırı — yüklenme veya gönderme hatası kırmızı gösterilir */}
+        {showError && (
+          <div className="px-4 py-2 bg-red-50 border-b border-red-100 flex items-center gap-2 text-[11px] text-red-700 shrink-0">
+            <AlertCircle size={13} className="shrink-0" />
+            <span className="flex-1 truncate">{showError}</span>
+            <button
+              onClick={() => { setSendError(''); void fetchRooms(); }}
+              className="p-1 rounded hover:bg-red-100 transition-colors"
+              title="Yeniden dene"
+            >
+              <RefreshCw size={12} />
+            </button>
+          </div>
+        )}
 
         {/* Body */}
         {isLoading ? (
@@ -268,26 +327,41 @@ export const SupportChat: React.FC<SupportChatProps> = ({ mode, onClose }) => {
             {selectedRoom.status === 'resolved' && mode === 'customer' && (
               <div className="px-4 pb-4 shrink-0">
                 <button
-                  onClick={async () => {
-                    // Kapatılan oda sonrası /api/chat/my yeni oda açar
-                    try {
-                      await apiRequest('/api/chat/my', { method: 'GET' });
-                      await fetchRooms();
-                      setView('room');
-                    } catch {
-                      onClose();
-                    }
-                  }}
-                  className="w-full py-3 rounded-xl bg-black text-white text-xs font-bold active:scale-95 transition-transform"
+                  onClick={startNewRoom}
+                  disabled={isStarting}
+                  className="w-full py-3 rounded-xl bg-black text-white text-xs font-bold active:scale-95 transition-transform disabled:opacity-40"
                 >
-                  Yeni Görüşme Başlat
+                  {isStarting ? 'Açılıyor…' : 'Yeni Görüşme Başlat'}
                 </button>
               </div>
             )}
           </>
+        ) : mode === 'customer' ? (
+          /* C4: oda yokken boş durum — açıklayıcı metin + başlat butonu.
+             GET artık oda oluşturmadığından müşteri buraya düşebilir. */
+          <div className="flex-1 flex flex-col items-center justify-center px-8 py-10 text-center space-y-4">
+            <div className="w-14 h-14 rounded-2xl bg-black text-white flex items-center justify-center shrink-0">
+              <Headphones size={24} />
+            </div>
+            <div className="space-y-1">
+              <h4 className="text-sm font-display font-bold text-black">Destek ekibine yazın</h4>
+              <p className="text-xs text-text-secondary leading-relaxed">
+                Sipariş, ödeme veya uygulama ile ilgili aklınıza takılan her konuda
+                canlı destek ekibimize mesaj gönderebilirsiniz. Genelde birkaç dakika
+                içinde yanıt alınır.
+              </p>
+            </div>
+            <button
+              onClick={startNewRoom}
+              disabled={isStarting}
+              className="w-full max-w-[240px] py-3 rounded-xl bg-black text-white text-xs font-bold active:scale-95 transition-transform disabled:opacity-40"
+            >
+              {isStarting ? 'Görüşme açılıyor…' : 'Görüşme Başlat'}
+            </button>
+          </div>
         ) : (
           <div className="flex-1 flex items-center justify-center text-sm text-text-secondary px-6 text-center">
-            {mode === 'customer' ? 'Sohbet açılamadı.' : 'Bir sohbet seçin.'}
+            Bir sohbet seçin.
           </div>
         )}
       </motion.div>

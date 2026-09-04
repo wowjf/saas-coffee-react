@@ -120,7 +120,7 @@ describe("attachAuth", () => {
     expect(req.authRole).toBe("customer");
   });
 
-  it("downgrades a manager without a matching sessionRole to customer", async () => {
+  it("falls back a manager without a matching sessionRole to staff, never customer (vardiya kuralı)", async () => {
     const user = await UserModel.create({
       name: "Menejur",
       surname: "Test",
@@ -136,7 +136,7 @@ describe("attachAuth", () => {
     const { req, nextCalled } = await runMiddleware(attachAuth, { authorization: `Bearer ${token}` });
 
     expect(nextCalled).toBe(true);
-    expect(req.authRole).toBe("customer");
+    expect(req.authRole).toBe("staff");
   });
 
   it("keeps the manager role when sessionRole matches the account role", async () => {
@@ -177,7 +177,7 @@ describe("attachAuth", () => {
     expect(req.authRole).toBe("staff");
   });
 
-  it("never upgrades a staff account above its role via sessionRole", async () => {
+  it("never upgrades a staff account above its role via sessionRole (etkin rol staff kalır)", async () => {
     const user = await UserModel.create({
       name: "Garson",
       surname: "Test",
@@ -193,7 +193,7 @@ describe("attachAuth", () => {
     const { req, nextCalled } = await runMiddleware(attachAuth, { authorization: `Bearer ${token}` });
 
     expect(nextCalled).toBe(true);
-    expect(req.authRole).toBe("customer");
+    expect(req.authRole).toBe("staff");
   });
 });
 

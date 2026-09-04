@@ -1,5 +1,11 @@
 import { Router } from "express";
-import { attachAuth, restrictTo, type AuthRequest } from "../middleware/auth";
+import {
+  attachAuth,
+  restrictTo,
+  restrictToManagerOrStaffRole,
+  getEffectiveRole,
+  type AuthRequest,
+} from "../middleware/auth";
 import { autoAsyncHandlers } from "../middleware/asyncHandler";
 import ReviewModel from "../models/Review";
 import CouponModel from "../models/Coupon";
@@ -14,6 +20,7 @@ import UserModel from "../models/User";
 import ProductModel from "../models/Product";
 import OrderModel from "../models/Order";
 import TableModel from "../models/Table";
+import NotificationModel from "../models/Notification";
 import { serializeDocument, sanitizePlainText, toIsoString } from "../utils";
 import {
   getLeaderboard,
@@ -556,6 +563,20 @@ router.post("/friends/request", attachAuth, async (req: AuthRequest, res) => {
       requestedAt: new Date().toISOString(),
     });
 
+    // C8: alıcıya uygulama içi bildirim — event alanıyla yazılır ki GET
+    // /notifications filtresinde görünebilsin (müşteri izin listesi api.ts
+    // tarafında genişletildiğinde devreye girer). Best-effort: ana akışı
+    // bozmaz.
+    void NotificationModel.create({
+      userId: friendId,
+      event: "social_friend_request",
+      title: "Yeni Arkadaşlık İsteği",
+      message: `${req.authUser!.name} ${req.authUser!.surname} sana arkadaşlık isteği gönderdi.`,
+      type: "info",
+      read: false,
+      timestamp: new Date(),
+    }).catch(() => undefined);
+
     return res.json(serializeDocument(request));
   } catch (error) {
     console.error("Send friend request error:", error);
@@ -709,6 +730,24 @@ router.post("/gifts/send", attachAuth, async (req: AuthRequest, res) => {
       sentAt: new Date().toISOString(),
       expiresAt: expiresAt.toISOString(),
     });
+
+    // C8: hediye alıcısına uygulama içi bildirim (event alanlı, best-effort).
+    const giftTitle =
+      type === "balance"
+        ? "Yeni Hediye Bakiyesi"
+        : "Yeni Ürün Hediyen Var";
+    void NotificationModel.create({
+      userId: recipientId,
+      event: "social_gift",
+      title: giftTitle,
+      message:
+        type === "balance"
+          ? `${userName} sana ₺${normalizedAmount} bakiye hediye etti.`
+          : `${userName} sana "${productName || "bir ürün"}" hediye etti.`,
+      type: "success",
+      read: false,
+      timestamp: new Date(),
+    }).catch(() => undefined);
 
     return res.json(serializeDocument(gift));
   } catch (error) {
@@ -971,26 +1010,60 @@ router.patch("/subscriptions/plans/:id", attachAuth, restrictTo("manager"), asyn
 // CHAT ENDPOINTS - Canlı Destek
 // ============================================
 
-// Get user's chat room
+// C4: GET artık yan etkisizdir — yalnızca aktif odayı okur; oda yoksa
+// null döner. Oda açmak için POST /chat/rooms kullanılır (aşağıda).
 router.get("/chat/my", attachAuth, async (req: AuthRequest, res) => {
   try {
     const userId = req.authUser!._id.toString();
+    const room = await ChatRoomModel.findOne({ customerId: userId, status: { $in: ["active", "waiting"] } });
+    return res.json(room ? serializeDocument(room) : null);
+  } catch (error) {
+    console.error("Get my chat error:", error);
+    return res.status(500).json({ message: await getSystemText("sohbet-yuklenirken-hata-olustu") });
+  }
+});
+
+// C4: müşteri için destek odası açar (başlık/ilk mesaj opsiyonel). Aktif
+// oda zaten varsa yeni oda açılmaz, mevcut oda döndürülür — çift oda
+// oluşumu engellenir. GET /chat/my'nin eski yan etkili davranışı bu
+// uca taşındı; panelin 'Yeni Görüşme Başlat' akışı burayı çağırır.
+router.post("/chat/rooms", attachAuth, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.authUser!._id.toString();
+    const customerName = `${req.authUser!.name} ${req.authUser!.surname}`;
+
     let room = await ChatRoomModel.findOne({ customerId: userId, status: { $in: ["active", "waiting"] } });
-    
+
     if (!room) {
-      // Create new chat room
+      // İlk mesaj verilmişse odaya yazılır — kullanıcı formu doldurmadan
+      // doğrudan sohbete başlayabilir.
+      const firstMessageRaw = sanitizePlainText(String(req.body?.message ?? ""));
+      const messages =
+        firstMessageRaw.length > 0
+          ? [
+              {
+                senderId: userId,
+                senderName: customerName,
+                senderRole: "customer",
+                message: firstMessageRaw.slice(0, 1000),
+                timestamp: new Date().toISOString(),
+                attachments: [],
+              } as any,
+            ]
+          : [];
+
       room = await ChatRoomModel.create({
         customerId: userId,
-        customerName: `${req.authUser!.name} ${req.authUser!.surname}`,
+        customerName,
         status: "waiting",
-        messages: [],
+        messages,
         lastMessageAt: new Date().toISOString(),
       });
     }
 
-    return res.json(serializeDocument(room));
+    return res.status(201).json(serializeDocument(room));
   } catch (error) {
-    console.error("Get my chat error:", error);
+    console.error("Create chat room error:", error);
     return res.status(500).json({ message: await getSystemText("sohbet-yuklenirken-hata-olustu") });
   }
 });
@@ -1015,7 +1088,9 @@ router.post("/chat/:roomId/message", attachAuth, async (req: AuthRequest, res) =
     const message = sanitizePlainText(String(req.body?.message ?? ""));
     const userId = req.authUser!._id.toString();
     const userName = `${req.authUser!.name} ${req.authUser!.surname}`;
-    const userRole = req.authUser!.role;
+    // C4: ham role yerine etkin rol — manager hesabı sessionRole ile
+    // customer'a inmişse mesajı müşteri olarak imzalamalıdır.
+    const userRole = getEffectiveRole(req.authUser);
 
     // MP-2.6: sohbet mesajı en fazla 1000 karakter olabilir.
     if (message.length > 1000) {
@@ -1111,6 +1186,19 @@ router.post("/chat/:roomId/close", attachAuth, restrictTo("staff", "manager"), a
 // RESERVATION ENDPOINTS - Rezervasyon Sistemi
 // ============================================
 
+// Rezervasyon yapılabilir aktif masalar (müşteri erişimli; /api/tables
+// staff/manager kısıtlı olduğundan müşteri paneli buradan çeker).
+router.get("/reservations/tables", attachAuth, async (req: AuthRequest, res) => {
+  try {
+    const tables = await TableModel.find({ isActive: true });
+    tables.sort((a, b) => Number(a.tableNumber) - Number(b.tableNumber));
+    return res.json(tables.map((table) => ({ tableNumber: table.tableNumber })));
+  } catch (error) {
+    console.error("List reservation tables error:", error);
+    return res.status(500).json({ message: await getSystemText("masalar-yuklenirken-hata-olustu") });
+  }
+});
+
 // Get user's reservations
 router.get("/reservations/my", attachAuth, async (req: AuthRequest, res) => {
   try {
@@ -1123,8 +1211,9 @@ router.get("/reservations/my", attachAuth, async (req: AuthRequest, res) => {
   }
 });
 
-// Get all reservations (staff/manager)
-router.get("/reservations", attachAuth, restrictTo("staff", "manager"), async (req: AuthRequest, res) => {
+// Get all reservations — müdür ünvanlı personel ve yöneticiler (garson/bar/
+// mutfak personeli tüm rezervasyon listesini göremez).
+router.get("/reservations", attachAuth, restrictToManagerOrStaffRole("mudur"), async (req: AuthRequest, res) => {
   try {
     // MP-1.4: query nesnesi normalleştirme — dizi/nesne girdisi sorguya
     // operatör olarak sızamaz.
@@ -1201,8 +1290,8 @@ router.post("/reservations", attachAuth, async (req: AuthRequest, res) => {
   }
 });
 
-// Update reservation status (staff/manager)
-router.patch("/reservations/:id/status", attachAuth, restrictTo("staff", "manager"), async (req: AuthRequest, res) => {
+// Update reservation status — müdür ünvanlı personel ve yöneticiler.
+router.patch("/reservations/:id/status", attachAuth, restrictToManagerOrStaffRole("mudur"), async (req: AuthRequest, res) => {
   try {
     const { id } = req.params;
     const { status, cancelReason } = req.body;

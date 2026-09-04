@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { X, Users, Trophy } from 'lucide-react';
+import { X, Users, Trophy, Crown, Medal, Award, Clock } from 'lucide-react';
 import { useApp } from '../AppContext';
 import { apiRequest, ApiRequestError } from '../lib/api';
+import { formatKpAsTl } from '../lib/loyalty';
 import PublicProfileModal from './PublicProfileModal';
 
 type PeriodKey = 'daily' | 'weekly' | 'monthly';
@@ -29,10 +30,10 @@ interface LeaderboardStatus {
   optedOutAt: string | null;
 }
 
-const PERIOD_TABS: { key: PeriodKey; label: string }[] = [
-  { key: 'daily', label: 'Günlük' },
-  { key: 'weekly', label: 'Haftalık' },
-  { key: 'monthly', label: 'Aylık' },
+const PERIOD_TABS: { key: PeriodKey; label: string; hint: string }[] = [
+  { key: 'daily', label: 'Günlük', hint: 'Bugün' },
+  { key: 'weekly', label: 'Haftalık', hint: 'Son 7 gün' },
+  { key: 'monthly', label: 'Aylık', hint: 'Son 30 gün' },
 ];
 
 function formatCountdown(ms: number) {
@@ -46,6 +47,26 @@ function formatCountdown(ms: number) {
   return `${minutes} dk`;
 }
 
+function periodRemainingLabel(period: PeriodKey): string {
+  const now = new Date();
+  const end = new Date(now);
+  if (period === 'daily') {
+    end.setHours(23, 59, 59, 999);
+  } else if (period === 'weekly') {
+    end.setDate(now.getDate() + (7 - ((now.getDay() + 6) % 7 || 7)));
+    end.setHours(23, 59, 59, 999);
+  } else {
+    end.setMonth(now.getMonth() + 1, 0);
+    end.setHours(23, 59, 59, 999);
+  }
+  const diff = end.getTime() - now.getTime();
+  if (diff <= 0) return 'Yenileniyor…';
+  const hours = Math.floor(diff / 3600000);
+  if (hours >= 48) return `${Math.floor(hours / 24)} gün kaldı`;
+  if (hours >= 1) return `${hours} saat kaldı`;
+  return `${Math.max(1, Math.floor(diff / 60000))} dk kaldı`;
+}
+
 function getInitials(name: string) {
   return name
     .split(' ')
@@ -54,6 +75,12 @@ function getInitials(name: string) {
     .map((part) => part[0]?.toUpperCase())
     .join('');
 }
+
+const RANK_STYLES: Record<number, { icon: React.ElementType; chip: string; label: string }> = {
+  1: { icon: Crown, chip: 'bg-black text-white', label: 'Şampiyon' },
+  2: { icon: Medal, chip: 'bg-neutral-800 text-white', label: '2.' },
+  3: { icon: Award, chip: 'bg-neutral-200 text-black', label: '3.' },
+};
 
 const LeaderboardModal: React.FC<{ open: boolean; onClose: () => void }> = ({ open, onClose }) => {
   const { user } = useApp();
@@ -96,6 +123,14 @@ const LeaderboardModal: React.FC<{ open: boolean; onClose: () => void }> = ({ op
       void loadLeaderboard('daily');
     }
   }, [open, loadStatus, loadLeaderboard]);
+
+  useEffect(() => {
+    if (open && period) {
+      void loadLeaderboard(period);
+    }
+    // period değişiminde yalnızca yeniden çek
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [period]);
 
   useEffect(() => {
     if (!open) return;
@@ -141,6 +176,11 @@ const LeaderboardModal: React.FC<{ open: boolean; onClose: () => void }> = ({ op
 
   const isCurrentUser = (userId: string) => user?.id === userId;
 
+  const podium = data?.entries.filter((e) => e.rank <= 3) ?? [];
+  const restEntries = data?.entries.filter((e) => e.rank > 3) ?? [];
+  const topKp = podium[0]?.kp ?? 0;
+  const myProgress = topKp > 0 && data?.currentUser ? Math.min(100, Math.round((data.currentUser.kp / topKp) * 100)) : 0;
+
   return (
     <AnimatePresence>
       {open && (
@@ -176,6 +216,22 @@ const LeaderboardModal: React.FC<{ open: boolean; onClose: () => void }> = ({ op
 
           {/* Main Content */}
           <main className="flex-1 overflow-hidden flex flex-col max-w-4xl mx-auto w-full px-4 sm:px-6 pt-4">
+            {/* Hero: dönem + ödül değeri */}
+            <div className="rounded-[24px] bg-neutral-950 text-white p-5 mb-4 shrink-0 flex flex-col sm:flex-row sm:items-center justify-between gap-3 border border-neutral-800">
+              <div className="space-y-1">
+                <span className="text-[10px] font-bold uppercase tracking-[0.2em] text-neutral-400">
+                  {PERIOD_TABS.find((tab) => tab.key === period)?.hint} Sıralaması
+                </span>
+                <p className="text-sm font-semibold text-white leading-snug">
+                  KP kazandıkça yüksel — her KP <span className="font-mono text-white">{formatKpAsTl(1)}</span> değerinde
+                </p>
+              </div>
+              <div className="flex items-center gap-1.5 text-[11px] text-neutral-400 shrink-0 self-start sm:self-auto">
+                <Clock size={13} />
+                <span className="font-mono">{periodRemainingLabel(period)}</span>
+              </div>
+            </div>
+
             {/* Period Switch Tabs */}
             <div className="grid grid-cols-3 gap-1 bg-neutral-100 p-1.5 rounded-2xl border border-border mb-4 shrink-0">
               {PERIOD_TABS.map((tab) => (
@@ -194,15 +250,32 @@ const LeaderboardModal: React.FC<{ open: boolean; onClose: () => void }> = ({ op
               ))}
             </div>
 
-            {/* Current User Rank Card */}
+            {/* Current User Rank Card + ilerleme */}
             {!loading && data?.currentUser && (
-              <div className="bg-neutral-950 text-white p-4 rounded-2xl flex items-center justify-between text-xs mb-4 shadow-sm shrink-0">
-                <span className="text-neutral-400 font-medium">Sıralamadaki Yerin</span>
-                <div className="flex items-center gap-2 font-bold">
-                  <span className="bg-neutral-800 px-2.5 py-1 rounded-lg text-white font-mono">#{data.currentUser.rank}</span>
-                  <span className="text-neutral-500">•</span>
-                  <span className="font-mono text-sm">{data.currentUser.kp} KP</span>
+              <div className="bg-neutral-950 text-white p-4 rounded-2xl mb-4 shadow-sm shrink-0 space-y-3 border border-neutral-800">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-neutral-400 font-medium">Sıralamadaki Yerin</span>
+                  <div className="flex items-center gap-2 font-bold">
+                    <span className="bg-neutral-800 px-2.5 py-1 rounded-lg text-white font-mono">#{data.currentUser.rank}</span>
+                    <span className="text-neutral-500">•</span>
+                    <span className="font-mono text-sm">{data.currentUser.kp} KP</span>
+                    <span className="text-neutral-500">•</span>
+                    <span className="font-mono text-sm text-neutral-300">{formatKpAsTl(data.currentUser.kp)}</span>
+                  </div>
                 </div>
+                {topKp > 0 && data.currentUser.rank > 1 && (
+                  <div className="space-y-1.5">
+                    <div className="h-1.5 rounded-full bg-neutral-800 overflow-hidden">
+                      <div
+                        className="h-full rounded-full bg-white transition-all duration-700"
+                        style={{ width: `${myProgress}%` }}
+                      />
+                    </div>
+                    <p className="text-[10px] text-neutral-500">
+                      Zirveye <span className="font-mono text-neutral-300">%{myProgress}</span> — lider {topKp} KP'de
+                    </p>
+                  </div>
+                )}
               </div>
             )}
 
@@ -227,10 +300,64 @@ const LeaderboardModal: React.FC<{ open: boolean; onClose: () => void }> = ({ op
                     <Users size={24} />
                   </div>
                   <p className="text-xs font-medium">Bu dönemde henüz sıralama oluşmadı.</p>
+                  <p className="text-[11px] text-neutral-400">Sipariş tamamlandıkça KP kazanın ve listeye girin.</p>
                 </div>
               )}
 
-              {!loading && data && data.entries.map((entry) => {
+              {!loading && podium.length > 0 && (
+                <div className="space-y-2 mb-3">
+                  {podium.map((entry) => {
+                    const mine = isCurrentUser(entry.userId);
+                    const style = RANK_STYLES[entry.rank] ?? { icon: Trophy, chip: 'bg-neutral-100 text-neutral-600', label: `${entry.rank}.` };
+                    const RankIcon = style.icon;
+                    return (
+                      <div
+                        key={entry.userId}
+                        onClick={() => setSelectedProfileUserId(entry.userId)}
+                        className={`flex items-center gap-3.5 px-4 py-4 rounded-[22px] border transition-all cursor-pointer ${
+                          mine
+                            ? 'bg-neutral-100 border-black shadow-xs hover:bg-neutral-200/80'
+                            : entry.rank === 1
+                              ? 'bg-neutral-950 border-neutral-800 hover:border-neutral-600'
+                              : 'bg-white border-border hover:border-black/50 hover:bg-neutral-50'
+                        }`}
+                      >
+                        <div className={`w-10 h-10 rounded-2xl flex items-center justify-center shrink-0 ${style.chip}`}>
+                          <RankIcon size={entry.rank === 1 ? 18 : 16} />
+                        </div>
+
+                        <div className="w-10 h-10 rounded-full overflow-hidden bg-neutral-200 text-neutral-700 text-xs font-bold flex items-center justify-center shrink-0 border border-neutral-300/60">
+                          {entry.avatar ? (
+                            <img src={entry.avatar} alt={entry.name} className="w-full h-full object-cover" />
+                          ) : (
+                            getInitials(entry.name)
+                          )}
+                        </div>
+
+                        <div className="flex-1 min-w-0">
+                          <p className={`text-sm font-bold truncate ${entry.rank === 1 && !mine ? 'text-white' : 'text-black'}`}>
+                            {entry.name} {mine && <span className="text-xs text-neutral-500 font-normal ml-1">(Sen)</span>}
+                          </p>
+                          <p className={`text-[10px] font-bold uppercase tracking-wider mt-0.5 ${entry.rank === 1 && !mine ? 'text-neutral-400' : 'text-neutral-500'}`}>
+                            {style.label}
+                          </p>
+                        </div>
+
+                        <div className="text-right shrink-0">
+                          <span className={`block text-base font-mono font-bold ${entry.rank === 1 && !mine ? 'text-white' : 'text-black'}`}>
+                            {entry.kp} KP
+                          </span>
+                          <span className={`block text-[10px] font-mono ${entry.rank === 1 && !mine ? 'text-neutral-400' : 'text-neutral-500'}`}>
+                            {formatKpAsTl(entry.kp)}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {!loading && restEntries.map((entry) => {
                 const mine = isCurrentUser(entry.userId);
                 return (
                   <div
@@ -242,15 +369,7 @@ const LeaderboardModal: React.FC<{ open: boolean; onClose: () => void }> = ({ op
                         : 'bg-surface border-border/80 hover:border-black/50 hover:bg-neutral-50'
                     }`}
                   >
-                    <div className={`w-8 h-8 rounded-xl text-xs font-mono font-bold flex items-center justify-center shrink-0 ${
-                      entry.rank === 1
-                        ? 'bg-black text-white'
-                        : entry.rank === 2
-                        ? 'bg-neutral-200 text-black'
-                        : entry.rank === 3
-                        ? 'bg-neutral-150 text-black'
-                        : 'bg-neutral-100 text-neutral-600'
-                    }`}>
+                    <div className="w-8 h-8 rounded-xl text-xs font-mono font-bold flex items-center justify-center shrink-0 bg-neutral-100 text-neutral-600">
                       #{entry.rank}
                     </div>
 
@@ -270,6 +389,7 @@ const LeaderboardModal: React.FC<{ open: boolean; onClose: () => void }> = ({ op
 
                     <div className="text-right shrink-0">
                       <span className="text-sm font-mono font-bold text-black">{entry.kp} KP</span>
+                      <span className="block text-[10px] font-mono text-neutral-500">{formatKpAsTl(entry.kp)}</span>
                     </div>
                   </div>
                 );

@@ -6,7 +6,20 @@ const NotificationSchema = new mongoose.Schema(
     targetRole: { type: String, enum: ["customer", "staff", "manager", ""], default: "", index: true },
     event: {
       type: String,
-      enum: ["order_preparing", "order_ready", "order_cancelled", "staff_new_order", "inventory_low_stock", ""],
+      enum: [
+        "order_preparing",
+        "order_ready",
+        "order_cancelled",
+        "staff_new_order",
+        "inventory_low_stock",
+        // C8: sosyal bildirim olayları — takip/arkadaşlık isteği/hediye.
+        // Üretim noktaları api.ts (yasak değil: follow) ve
+        // new-features.ts (friend/gift) tarafında event alanıyla yazılır.
+        "social_follow",
+        "social_friend_request",
+        "social_gift",
+        "",
+      ],
       default: "",
       index: true,
     },

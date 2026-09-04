@@ -48,7 +48,7 @@ export const ReservationPanel: React.FC = () => {
     try {
       const [reservations, tableList] = await Promise.all([
         apiRequest<Reservation[]>('/api/reservations/my'),
-        apiRequest<Array<{ tableNumber: string }>>('/api/tables'),
+        apiRequest<Array<{ tableNumber: string }>>('/api/reservations/tables'),
       ]);
       setMyReservations(Array.isArray(reservations) ? reservations : []);
       setTables(Array.isArray(tableList) ? tableList : []);
@@ -96,16 +96,11 @@ export const ReservationPanel: React.FC = () => {
   };
 
   if (isLoading) {
-    return <div className="p-6 pb-32 text-center text-sm text-text-secondary">Yükleniyor…</div>;
+    return <div className="py-6 text-center text-sm text-text-secondary">Yükleniyor…</div>;
   }
 
   return (
-    <div className="p-5 pb-32 space-y-6">
-      <div className="space-y-0.5">
-        <h1 className="text-2xl font-display font-bold text-text-primary">Rezervasyon</h1>
-        <p className="text-xs text-text-secondary">Masanızı önceden ayırtın</p>
-      </div>
-
+    <div className="space-y-6">
       {feedback && (
         <div className={cn(
           "p-4 rounded-2xl text-xs font-semibold border",

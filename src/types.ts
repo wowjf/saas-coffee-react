@@ -132,6 +132,12 @@ export interface User {
   };
   subscriptionId?: string;
   friends?: string[];
+  tckn?: string;
+  identityVerification?: {
+    phone: boolean;
+    email: boolean;
+    tckn: boolean;
+  };
   selectedCampaign?: {
     campaignId: string;
     campaignTitle: string;

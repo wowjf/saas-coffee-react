@@ -1,10 +1,10 @@
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useMemo, useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useApp } from '../AppContext';
 import { SupportChat } from './SupportChat';
 import { ReservationPanel } from './ReservationPanel';
 import { FriendsGiftsPanel } from './FriendsGiftsPanel';
-import { Address, Campaign, LoyaltyQrPayload, PaymentMethod } from '../types';
+import { Address, Campaign, LoyaltyQrPayload, Notification, PaymentMethod } from '../types';
 import { 
   Wallet, 
   QrCode, 
@@ -80,6 +80,7 @@ import {
   Globe,
   Lock,
   Copy,
+  CalendarDays,
 } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import { apiRequest, uploadImage } from '../lib/api';
@@ -167,6 +168,140 @@ const OrderNotificationCard: React.FC<{ orderId?: string }> = ({ orderId }) => {
   );
 };
 
+// C8: bildirim kartı — her SSE/ poll tazelemesinde listenin baştan
+// çizilmesini engellemek için React.memo'lanır (props: notification +
+// onRead referansı stabil kalır).
+const NotificationItem: React.FC<{
+  notification: Notification;
+  isSelected: boolean;
+  onSelect: (n: Notification) => void;
+}> = React.memo(({ notification: n, isSelected, onSelect }) => {
+  // C8 (madde 7): bildirim olay türüne göre ikon/renk eşlemesi — sipariş
+  // durumu bildirimleri artık türden ayırt edilir.
+  const eventMeta = (() => {
+    const event = (n as any).event as string | undefined;
+    switch (event) {
+      case 'order_preparing':
+        return { Icon: Clock, cls: 'bg-amber-50/80 text-amber-600 border-amber-100' };
+      case 'order_ready':
+        return { Icon: CheckCircle2, cls: 'bg-green-50/80 text-green-600 border-green-100' };
+      case 'order_cancelled':
+        return { Icon: X, cls: 'bg-red-50/80 text-red-600 border-red-100' };
+      case 'social_follow':
+      case 'social_friend_request':
+      case 'social_gift':
+        return { Icon: Users, cls: 'bg-violet-50/80 text-violet-600 border-violet-100' };
+      default:
+        return {
+          Icon: Bell,
+          cls:
+            n.type === 'success'
+              ? 'bg-green-50/80 text-green-600 border-green-100'
+              : n.type === 'warning'
+                ? 'bg-amber-50/80 text-amber-600 border-amber-100'
+                : 'bg-blue-50/80 text-blue-600 border-blue-100',
+        };
+    }
+  })();
+  const { Icon: EventIcon, cls: iconCls } = eventMeta;
+
+  return (
+    <div
+      key={n.id}
+      onClick={() => onSelect(n)}
+      className={cn(
+        "bg-white border rounded-2xl p-4 transition-all cursor-pointer hover:border-black/50 relative group flex gap-3",
+        isSelected ? "border-black ring-1 ring-black shadow-sm" : "border-border/80",
+        !n.read && "bg-blue-50/5 border-blue-100"
+      )}
+    >
+      <div className={cn("w-8 h-8 rounded-lg flex items-center justify-center shrink-0 border mt-0.5", iconCls)}>
+        <EventIcon size={14} />
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="flex justify-between items-center gap-2 mb-1">
+          <h4 className={cn("text-xs font-bold text-black truncate", !n.read && "text-blue-900")}>
+            {n.title}
+          </h4>
+          {/* C8: okunmamış nokta statiktir — sonsuz pulse listeyi titretmez. */}
+          {!n.read && <div className="w-1.5 h-1.5 bg-blue-500 rounded-full shrink-0" />}
+        </div>
+        <p className="text-[11px] text-text-secondary truncate leading-normal">
+          {n.message}
+        </p>
+        <div className="flex justify-between items-center mt-2.5 text-[9px] text-text-secondary border-t border-zinc-50 pt-2">
+          <span>{new Date(n.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+        </div>
+      </div>
+    </div>
+  );
+});
+NotificationItem.displayName = 'NotificationItem';
+
+// C8: mobil bildirim kartı — aynı memo yaklaşımı.
+const MobileNotificationItem: React.FC<{
+  notification: Notification;
+  onRead: (id: string) => void;
+}> = React.memo(({ notification: n, onRead }) => {
+  const eventMeta = (() => {
+    const event = (n as any).event as string | undefined;
+    switch (event) {
+      case 'order_preparing':
+        return { Icon: Clock, cls: 'bg-amber-50 text-amber-600' };
+      case 'order_ready':
+        return { Icon: CheckCircle2, cls: 'bg-green-50 text-green-600' };
+      case 'order_cancelled':
+        return { Icon: X, cls: 'bg-red-50 text-red-600' };
+      case 'social_follow':
+      case 'social_friend_request':
+      case 'social_gift':
+        return { Icon: Users, cls: 'bg-violet-50 text-violet-600' };
+      default:
+        return {
+          Icon: Bell,
+          cls:
+            n.type === 'success'
+              ? 'bg-green-50 text-green-600'
+              : n.type === 'warning'
+                ? 'bg-amber-50 text-amber-600'
+                : 'bg-blue-50 text-blue-600',
+        };
+    }
+  })();
+  const { Icon: EventIcon, cls: iconCls } = eventMeta;
+
+  return (
+    <div
+      className={cn(
+        "bg-surface border border-border rounded-2xl p-4 flex gap-4 relative group transition-all",
+        !n.read && "border-blue-200 bg-blue-50/10 shadow-sm"
+      )}
+      onClick={() => !n.read && onRead(n.id)}
+    >
+      <div className={cn("w-10 h-10 rounded-xl flex items-center justify-center shrink-0", iconCls, !n.read && "ring-2 ring-blue-100")}>
+        <EventIcon size={20} />
+      </div>
+      <div className="space-y-1 flex-1">
+        <div className="flex justify-between items-start">
+          <div className="flex items-center gap-2">
+            <h3 className={cn("text-sm font-bold", !n.read && "text-blue-900")}>{n.title}</h3>
+            {!n.read && <div className="w-2 h-2 bg-blue-500 rounded-full" />}
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] text-text-secondary">
+              {new Date(n.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+            </span>
+          </div>
+        </div>
+        <p className={cn("text-xs leading-relaxed", !n.read ? "text-blue-800/80" : "text-text-secondary")}>
+          {n.message}
+        </p>
+      </div>
+    </div>
+  );
+});
+MobileNotificationItem.displayName = 'MobileNotificationItem';
+
 const DynamicIslandHeader: React.FC<{
   activeTab: string;
   profileView?: string;
@@ -198,11 +333,22 @@ const DynamicIslandHeader: React.FC<{
     label = 'Fırsatlar & Sadakat';
   } else if (activeTab === 'orders') {
     if (activeOrder && activeOrder.status === 'ready') {
-      icon = <span className="w-2.5 h-2.5 rounded-full bg-black animate-ping shrink-0" />;
+      // C8: ping dalgası duruma özgü anahtarla YALNIZCA BİR kez oynar —
+      // her SSE tazelemesinde sonsuz döngüye girmez, canlılık hissi korunur.
+      icon = (
+        <span key={`ready-${activeOrder.id}`} className="relative flex w-2.5 h-2.5 shrink-0 items-center justify-center">
+          <span
+            className="absolute inset-0 rounded-full bg-black animate-ping"
+            style={{ animationIterationCount: 2 }}
+          />
+          <span className="relative w-2.5 h-2.5 rounded-full bg-black" />
+        </span>
+      );
       label = 'Siparişiniz Hazır!';
       sublabel = `#${getOrderDisplayCode(activeOrder.id)}`;
     } else if (activeOrder && activeOrder.status === 'preparing') {
-      icon = <span className="w-2.5 h-2.5 rounded-full bg-black animate-pulse shrink-0" />;
+      // C8: sabit dolu nokta — sonsuz pulse yerine statik gösterge.
+      icon = <span className="w-2.5 h-2.5 rounded-full bg-black shrink-0" />;
       label = 'Hazırlanıyor';
       sublabel = `#${getOrderDisplayCode(activeOrder.id)}`;
     } else {
@@ -226,6 +372,7 @@ const DynamicIslandHeader: React.FC<{
         about: 'Hakkımızda',
         'orders-history': 'Geçmiş Siparişler',
         'friends-gifts': 'Arkadaşlar & Hediyeler',
+        'reservations': 'Masa Rezervasyonu',
         'topups-history': 'Bakiye Geçmişi',
       };
       label = subLabels[profileView] || 'Profil';
@@ -240,7 +387,9 @@ const DynamicIslandHeader: React.FC<{
   return (
     <div className="sticky top-3 z-40 w-full max-w-7xl mx-auto px-4 sm:px-6 pointer-events-none mb-4">
       <motion.div
-        layout
+        /* C8: layout prop'u kaldırıldı — her veri tazelemesinde spring
+           animasyonunu yeniden oynatıp başlığı titretiyordu. Giriş animasyonu
+           yalnızca mount'ta çalışır. */
         initial={{ scale: 0.96, opacity: 0, y: -10 }}
         animate={{ scale: 1, opacity: 1, y: 0 }}
         transition={{ type: 'spring', damping: 25, stiffness: 350 }}
@@ -373,7 +522,7 @@ export const CustomerPanel: React.FC<{ activeTab: string }> = ({ activeTab }) =>
   const [ordersView, setOrdersView] = useState<'hub' | 'list'>('hub');
   const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
   const [selectedNotificationId, setSelectedNotificationId] = useState<string | null>(null);
-  const [profileView, setProfileView] = useState<'main' | 'addresses' | 'payments' | 'favorites' | 'settings' | 'profile-info' | 'change-password' | 'about' | 'policies' | 'orders-history' | 'topups-history' | 'friends-gifts'>('main');
+  const [profileView, setProfileView] = useState<'main' | 'addresses' | 'payments' | 'favorites' | 'settings' | 'profile-info' | 'change-password' | 'about' | 'policies' | 'orders-history' | 'topups-history' | 'friends-gifts' | 'reservations'>('main');
   const [menuView, setMenuView] = useState<'categories' | 'products'>('categories');
   const [searchQuery, setSearchQuery] = useState('');
   const [showInStockOnly, setShowInStockOnly] = useState(false);
@@ -427,8 +576,20 @@ export const CustomerPanel: React.FC<{ activeTab: string }> = ({ activeTab }) =>
   // C4: canlı destek sohbeti
   const [showSupportChat, setShowSupportChat] = useState(false);
 
-  // C5: rezervasyon görünümü
-  const [showReservations, setShowReservations] = useState(false);
+  // C8: canlı sipariş — her render'da orders.find ile yeni nesne üretmek
+  // yerine memoize edilir; başlık yalnızca gerçek değişimde güncellenir.
+  const activeOrder = useMemo(
+    () => orders.find(o => o.userId === user?.id && (o.status === 'ready' || o.status === 'preparing' || o.status === 'pending')),
+    [orders, user?.id],
+  );
+
+  // C8: bildirim seçimi — memo'lu kart bileşenine stabil referans.
+  const handleNotificationSelect = useCallback((n: Notification) => {
+    setSelectedNotificationId(n.id);
+    if (!n.read) markNotificationRead(n.id);
+  }, [markNotificationRead]);
+
+  // C5: rezervasyon görünümü — profil sekmesi altında (profileView: 'reservations')
 
   useEffect(() => {
     if (activeTab === 'profile') {
@@ -1582,14 +1743,14 @@ export const CustomerPanel: React.FC<{ activeTab: string }> = ({ activeTab }) =>
         {user && notifications.length > 0 && (
           <div className="flex justify-end gap-2 mb-4">
             {notifications.some(n => !n.read) && (
-              <button 
+              <button
                 onClick={() => markAllNotificationsRead()}
                 className="text-[10px] font-bold text-blue-600 uppercase tracking-widest px-3.5 py-2 rounded-xl hover:bg-blue-50 transition-colors border border-blue-200 bg-blue-50/10 cursor-pointer"
               >
                 Tümünü Okundu İşaretle
               </button>
             )}
-            <button 
+            <button
               onClick={clearNotifications}
               className="text-[10px] font-bold text-red-500 uppercase tracking-widest px-3.5 py-2 rounded-xl hover:bg-red-50 transition-colors border border-red-200 bg-red-50/10 cursor-pointer"
             >
@@ -1598,10 +1759,15 @@ export const CustomerPanel: React.FC<{ activeTab: string }> = ({ activeTab }) =>
           </div>
         )}
 
+        {/* C8: push-abonelik kartı liste akışından çıkarıldı — sekme başlığı
+            altında statik durur, her poll'da yeniden mount olmaz. */}
+        <div className="mb-4 shrink-0">
+          <OrderNotificationCard />
+        </div>
+
         <div className="grid grid-cols-1 md:grid-cols-[340px_1fr] gap-8 items-start">
           {/* Left Column: Notifications List */}
           <div className="space-y-3 h-[calc(100vh-220px)] overflow-y-auto no-scrollbar pr-2">
-            <OrderNotificationCard />
             {(!user || notifications.length === 0) ? (
               <div className="text-center py-20 space-y-4 border border-border border-dashed rounded-3xl bg-zinc-50/50">
                 <div className="w-12 h-12 bg-white rounded-full flex items-center justify-center mx-auto text-text-secondary border border-border">
@@ -1610,54 +1776,14 @@ export const CustomerPanel: React.FC<{ activeTab: string }> = ({ activeTab }) =>
                 <p className="text-text-secondary text-xs">{t("henuz-bir-bildirim-yok")}</p>
               </div>
             ) : (
-              notifications.map(n => {
-                const isSelected = selectedNotificationId === n.id;
-                return (
-                  <div 
-                    key={n.id} 
-                    onClick={() => {
-                      setSelectedNotificationId(n.id);
-                      if (!n.read) markNotificationRead(n.id);
-                    }}
-                    className={cn(
-                      "bg-white border rounded-2xl p-4 transition-all cursor-pointer hover:border-black/50 relative group flex gap-3",
-                      isSelected ? "border-black ring-1 ring-black shadow-sm" : "border-border/80",
-                      !n.read && "bg-blue-50/5 border-blue-100"
-                    )}
-                  >
-                    <div className={cn(
-                      "w-8 h-8 rounded-lg flex items-center justify-center shrink-0 border mt-0.5",
-                      n.type === 'success' ? "bg-green-50/80 text-green-600 border-green-100" : 
-                      n.type === 'warning' ? "bg-amber-50/80 text-amber-600 border-amber-100" : "bg-blue-50/80 text-blue-600 border-blue-100"
-                    )}>
-                      <Bell size={14} />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex justify-between items-center gap-2 mb-1">
-                        <h4 className={cn("text-xs font-bold text-black truncate", !n.read && "text-blue-900")}>
-                          {n.title}
-                        </h4>
-                        {!n.read && <div className="w-1.5 h-1.5 bg-blue-500 rounded-full animate-pulse shrink-0" />}
-                      </div>
-                      <p className="text-[11px] text-text-secondary truncate leading-normal">
-                        {n.message}
-                      </p>
-                      <div className="flex justify-between items-center mt-2.5 text-[9px] text-text-secondary border-t border-zinc-50 pt-2">
-                        <span>{new Date(n.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-                        <button 
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            deleteNotification(n.id);
-                          }}
-                          className="p-1 rounded hover:bg-red-50 text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"
-                        >
-                          <X size={12} />
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                );
-              })
+              notifications.map(n => (
+                <NotificationItem
+                  key={n.id}
+                  notification={n}
+                  isSelected={selectedNotificationId === n.id}
+                  onSelect={handleNotificationSelect}
+                />
+              ))
             )}
           </div>
 
@@ -1729,7 +1855,7 @@ export const CustomerPanel: React.FC<{ activeTab: string }> = ({ activeTab }) =>
       <div className="p-4 sm:p-6 pb-32 space-y-4">
         {user && notifications.length > 0 && (
           <div className="flex justify-end">
-            <button 
+            <button
               onClick={clearNotifications}
               className="text-[10px] font-bold text-red-500 uppercase tracking-widest px-3 py-1.5 rounded-xl hover:bg-red-50 transition-colors border border-red-200 bg-red-50/10 cursor-pointer"
             >
@@ -1737,8 +1863,12 @@ export const CustomerPanel: React.FC<{ activeTab: string }> = ({ activeTab }) =>
             </button>
           </div>
         )}
-        <div className="space-y-3">
+        {/* C8: push-abonelik kartı listenin üstünde statik — scroll akışına
+            gömülü değildir, her poll'da yeniden mount olmaz. */}
+        <div className="shrink-0">
           <OrderNotificationCard />
+        </div>
+        <div className="space-y-3">
           {(!user || notifications.length === 0) ? (
             <div className="text-center py-20 space-y-4">
               <div className="w-16 h-16 bg-surface rounded-full flex items-center justify-center mx-auto text-text-secondary">
@@ -1748,48 +1878,7 @@ export const CustomerPanel: React.FC<{ activeTab: string }> = ({ activeTab }) =>
             </div>
           ) : (
             notifications.map(n => (
-              <div 
-                key={n.id} 
-                className={cn(
-                  "bg-surface border border-border rounded-2xl p-4 flex gap-4 relative group transition-all",
-                  !n.read && "border-blue-200 bg-blue-50/10 shadow-sm"
-                )}
-                onClick={() => !n.read && markNotificationRead(n.id)}
-              >
-                <div className={cn(
-                  "w-10 h-10 rounded-xl flex items-center justify-center shrink-0",
-                  n.type === 'success' ? "bg-green-50 text-green-600" : 
-                  n.type === 'warning' ? "bg-amber-50 text-amber-600" : "bg-blue-50 text-blue-600",
-                  !n.read && "ring-2 ring-blue-100"
-                )}>
-                  <Bell size={20} />
-                </div>
-                <div className="space-y-1 flex-1">
-                  <div className="flex justify-between items-start">
-                    <div className="flex items-center gap-2">
-                      <h3 className={cn("text-sm font-bold", !n.read && "text-blue-900")}>{n.title}</h3>
-                      {!n.read && <div className="w-2 h-2 bg-blue-500 rounded-full animate-pulse" />}
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-[10px] text-text-secondary">
-                        {new Date(n.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                      </span>
-                      <button 
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          deleteNotification(n.id);
-                        }}
-                        className="p-1 rounded-lg hover:bg-red-50 text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"
-                      >
-                        <X size={14} />
-                      </button>
-                    </div>
-                  </div>
-                  <p className={cn("text-xs leading-relaxed", !n.read ? "text-blue-800/80" : "text-text-secondary")}>
-                    {n.message}
-                  </p>
-                </div>
-              </div>
+              <MobileNotificationItem key={n.id} notification={n} onRead={markNotificationRead} />
             ))
           )}
         </div>
@@ -1823,23 +1912,6 @@ export const CustomerPanel: React.FC<{ activeTab: string }> = ({ activeTab }) =>
 
     content = (
       <div className="max-w-6xl mx-auto h-full p-4 sm:p-6 pb-32 md:pb-8 space-y-6">
-        {/* C5: Rezervasyon kartı */}
-        <div className="bg-white border border-border rounded-[28px] p-5 shadow-sm flex items-center justify-between gap-4">
-          <div>
-            <h3 className="text-sm font-bold text-black">Masa Rezervasyonu</h3>
-            <p className="text-xs text-text-secondary mt-0.5">Masanızı önceden ayırtın; onayı personelden gelir.</p>
-          </div>
-          <button
-            type="button"
-            onClick={() => setShowReservations(true)}
-            className="px-4 py-2.5 rounded-xl bg-black text-white text-xs font-bold active:scale-95 transition-transform shrink-0"
-          >
-            Rezervasyon Yap
-          </button>
-        </div>
-        {showReservations && (
-          <ReservationPanel />
-        )}
         {campaignSelectionError && (
           <motion.div 
             initial={{ opacity: 0, y: -8 }} 
@@ -2176,6 +2248,7 @@ export const CustomerPanel: React.FC<{ activeTab: string }> = ({ activeTab }) =>
     const sidebarMenuItems = [
       { id: 'profile-info', label: 'Ayarlar & Profil Bilgileri', icon: Settings },
       { id: 'friends-gifts', label: 'Arkadaşlar & Hediyeler', icon: Users },
+      { id: 'reservations', label: 'Masa Rezervasyonu', icon: CalendarDays },
       { id: 'change-password', label: t("sifre-degistir"), icon: Shield },
       { id: 'addresses', label: 'Adreslerim', icon: MapPin },
       { id: 'payments', label: t("odeme-yontemleri"), icon: CreditCard },
@@ -2195,6 +2268,16 @@ export const CustomerPanel: React.FC<{ activeTab: string }> = ({ activeTab }) =>
             <p className="text-xs text-text-secondary mt-1">Arkadaş ekleyin, bakiye hediyesi gönderin ve alın.</p>
           </div>
           <FriendsGiftsPanel />
+        </div>
+      );
+    } else if (effectiveProfileView === 'reservations') {
+      rightPanelContent = (
+        <div className="bg-white border border-border rounded-[32px] p-6 sm:p-8 shadow-sm space-y-6">
+          <div className="border-b border-border pb-4">
+            <h2 className="text-xl font-display font-bold text-black">Masa Rezervasyonu</h2>
+            <p className="text-xs text-text-secondary mt-1">Masanızı önceden ayırtın; onayı personelden gelir.</p>
+          </div>
+          <ReservationPanel />
         </div>
       );
     } else if (effectiveProfileView === 'profile-info') {
@@ -3261,6 +3344,7 @@ export const CustomerPanel: React.FC<{ activeTab: string }> = ({ activeTab }) =>
 
             {[
               { label: 'Arkadaşlar & Hediyeler', icon: Users, onClick: () => setProfileView('friends-gifts') },
+              { label: 'Masa Rezervasyonu', icon: CalendarDays, onClick: () => setProfileView('reservations') },
               { label: 'Ayarlar', icon: Settings, onClick: () => setProfileView('settings') },
               { label: t("gecmis-siparislerim"), icon: ShoppingBag, onClick: () => setProfileView('orders-history') },
               { label: 'Bakiye Yükleme Geçmişi', icon: Wallet, onClick: () => setProfileView('topups-history') },
@@ -4024,6 +4108,18 @@ export const CustomerPanel: React.FC<{ activeTab: string }> = ({ activeTab }) =>
           <FriendsGiftsPanel />
         </div>
       );
+    } else if (profileView === 'reservations') {
+      mobileViewContent = (
+        <div className="p-6 pb-32 space-y-6">
+          <div className="flex items-center gap-4">
+            <button onClick={() => setProfileView('main')} className="w-10 h-10 rounded-full bg-surface border border-border flex items-center justify-center">
+              <ArrowLeft size={20} />
+            </button>
+            <h1 className="text-xl font-display font-bold">Masa Rezervasyonu</h1>
+          </div>
+          <ReservationPanel />
+        </div>
+      );
     } else if (profileView === 'about') {
       mobileViewContent = (
         <div className="p-6 pb-32 space-y-6">
@@ -4220,7 +4316,7 @@ export const CustomerPanel: React.FC<{ activeTab: string }> = ({ activeTab }) =>
         onOpenCart={() => setShowCartModal(true)}
         onOpenQR={() => setShowQR(true)}
         onOpenLeaderboard={() => setShowLeaderboard(true)}
-        activeOrder={orders.find(o => o.userId === user?.id && (o.status === 'ready' || o.status === 'preparing' || o.status === 'pending'))}
+        activeOrder={activeOrder}
       />
       <AnimatePresence mode="wait">
         <motion.div
@@ -4564,12 +4660,10 @@ export const CustomerPanel: React.FC<{ activeTab: string }> = ({ activeTab }) =>
                       return;
                     }
 
-                    // Guvenlik (MP-0.1): ciro/bonus hesabi ve kampanya uygulaması
-                    // sunucu tarafında yapılır; istemci yalnızca yüklenecek tutarı
-                    // gönderir. Müşteri tarafı yükleme akışı personel ucu kapatıldığı
-                    // için 403 döner — kasa yönlendirmesi yapılır.
+                    // Demo modu: ciro/bonus hesabi ve kampanya uygulaması sunucu
+                    // tarafında yapılır (MP-0.1); istemci yalnızca tutarı gönderir.
                     updateBalance(amount).catch(() => {
-                      alert(t("musteri-tarafi-bakiye-yukleme-gecici-olarak-devre-disi-lutfen-kasadan-yukleme-yapin"));
+                      alert(t("bakiye-yuklenirken-hata-olustu"));
                     });
                     setShowTopUpModal(false);
                     setTopUpAmount('');

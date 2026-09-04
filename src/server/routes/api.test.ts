@@ -470,8 +470,8 @@ async function createManagerAndGetToken(email = "yonetici@test.com") {
   return { token: login.body.token as string, managerId: manager._id.toString() };
 }
 
-describe("POST /api/users/me/balance (MP-0.1: self top-up)", () => {
-  it("rejects a customer with 403 and does not change the balance", async () => {
+describe("POST /api/users/me/balance (self top-up)", () => {
+  it("rejects a customer self top-up outside development (S-K5 restored outside dev)", async () => {
     const { token, userId } = await getTokenFor();
     await UserModel.updateOne({ _id: userId }, { $set: { balance: 10 } });
 
