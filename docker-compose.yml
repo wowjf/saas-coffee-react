@@ -12,7 +12,7 @@ services:
       NODE_ENV: production
       HOST: 0.0.0.0
       PORT: 3000
-      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required - set it in your .env file (generate with: openssl rand -hex 32)}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required - set it in your .env file (generate with openssl rand -hex 32)}
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:?ALLOWED_ORIGINS is required in production - list explicit domains, e.g. https://bancho.cafe,https://www.bancho.cafe}
       MONGODB_URI: mongodb://root:${MONGO_INITDB_ROOT_PASSWORD}@mongodb:27017/cafe_db?authSource=admin
       ENABLE_SEED: ${ENABLE_SEED:-true}
