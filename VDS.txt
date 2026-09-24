@@ -1,0 +1,11 @@
+SSH kullanıcı adı:
+root
+
+IPv4:
+187.124.189.250
+
+Kök erişimi:
+ssh root@187.124.189.250
+
+Password: 
+,?PJ#43m.VAm.8PH
